@@ -156,6 +156,47 @@ def parse_video_fallback(url: str) -> dict:
         'cookie_header': ''  # Fallback uses hosted proxies; cookies are handled upstream
     }
 
+def parse_video_pearktrue(url: str) -> dict:
+    """Second fallback parser that queries pearktrue public API."""
+    logger.info(f"Using PearkTrue fallback parser for URL: {url}")
+    api_url = f"https://api.pearktrue.cn/api/douyin/?url={urllib.parse.quote(url)}"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+    
+    try:
+        req = urllib.request.Request(api_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            
+        if data.get('code') != 200 or 'data' not in data:
+            status_msg = data.get('msg') or data.get('message') or 'Unknown error'
+            raise ValueError(f"PearkTrue API returned error status: {status_msg}")
+            
+        video_data = data['data']
+        video_url = video_data.get('video')
+        if not video_url:
+            raise ValueError("No video URL returned by PearkTrue API")
+            
+        metadata = {
+            'id': '',
+            'title': video_data.get('title') or 'No Title',
+            'description': video_data.get('title') or '',
+            'thumbnail': video_data.get('cover') or '',
+            'uploader': 'Unknown',
+            'duration': 0.0,
+            'raw_video_url': video_url,
+            'extractor': 'Douyin'
+        }
+        
+        return {
+            'metadata': metadata,
+            'cookie_header': ''
+        }
+    except Exception as e:
+        logger.error(f"PearkTrue API connection or parse error: {str(e)}")
+        raise e
+
 def parse_video(url: str) -> dict:
     """Uses yt-dlp to extract video metadata and direct URL along with session cookies."""
     ydl_opts = {
@@ -163,6 +204,14 @@ def parse_video(url: str) -> dict:
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+        }
     }
     
     # Use cookies if available
@@ -213,13 +262,17 @@ def parse_video(url: str) -> dict:
                 'cookie_header': cookie_header
             }
     except Exception as e:
-        logger.warning(f"Local yt-dlp parsing failed: {str(e)}. Swapping to fallback API...")
+        logger.warning(f"Local yt-dlp parsing failed: {str(e)}. Swapping to fallback API 1 (douyin.wtf)...")
         try:
             return parse_video_fallback(url)
         except Exception as fallback_err:
-            logger.error(f"Fallback parsing also failed: {str(fallback_err)}")
-            # Raise original error to represent the primary failure reason
-            raise e
+            logger.warning(f"Fallback 1 failed: {str(fallback_err)}. Swapping to fallback API 2 (pearktrue)...")
+            try:
+                return parse_video_pearktrue(url)
+            except Exception as fallback_err_2:
+                logger.error(f"All fallback parsers failed. Fallback 1: {str(fallback_err)}. Fallback 2: {str(fallback_err_2)}")
+                # Raise original error to represent the primary failure reason
+                raise e
 
 @app.get("/")
 async def serve_ui():
