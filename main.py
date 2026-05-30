@@ -16,7 +16,7 @@ from telebot import types
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
-logging.getLogger("httpx").setLevel(logging.WARNING) # Mute verbose httpx logs
+logging.getLogger("httpx").setLevel(logging.WARNING)  # Mute verbose httpx logs
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -31,21 +31,142 @@ RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 COOKIES_CONTENT = os.getenv("COOKIES_CONTENT")
 TG_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@renzhiup")
 
+
+# ==========================================
+# Utility Functions (must be defined first)
+# ==========================================
+
+def sanitize_and_bridge_cookies(file_path: str):
+    """Reads a cookie file, fixes wrapped lines, standardizes columns to tabs, clones douyin.com keys to iesdouyin.com, and writes it back."""
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        return
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        raw_lines = content.strip().split('\n')
+        combined_lines = []
+
+        # Phase 1: Merge wrapped lines
+        for line in raw_lines:
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            if line_stripped.startswith("#"):
+                combined_lines.append(line_stripped)
+                continue
+
+            is_new_cookie = False
+            first_word = line_stripped.split()[0] if line_stripped.split() else ""
+            if first_word.startswith(".") or "douyin.com" in first_word or "tiktok.com" in first_word:
+                is_new_cookie = True
+
+            if is_new_cookie:
+                combined_lines.append(line_stripped)
+            else:
+                if combined_lines and not combined_lines[-1].startswith("#"):
+                    prev_line = combined_lines[-1]
+                    if prev_line[-1].isspace() or line_stripped[0].isspace():
+                        combined_lines[-1] = prev_line + line_stripped
+                    else:
+                        combined_lines[-1] = prev_line + " " + line_stripped
+                else:
+                    combined_lines.append(line_stripped)
+
+        # Phase 2: Convert to tab separation, clone keys to iesdouyin.com
+        cleaned_lines = []
+        cloned_lines = []
+        for line in combined_lines:
+            if line.startswith("#"):
+                cleaned_lines.append(line)
+                continue
+
+            parts = line.split('\t')
+            if len(parts) < 3:
+                parts = re.split(r'\s+', line)
+
+            if len(parts) == 6:
+                parts.append("")
+
+            if len(parts) == 7:
+                # Force domain_specified flag to perfectly align with dot prefix to satisfy python's cookiejar assert
+                starts_with_dot = parts[0].startswith(".")
+                parts[1] = "TRUE" if starts_with_dot else "FALSE"
+                cleaned_lines.append("\t".join(parts))
+
+                # Clone to iesdouyin.com
+                domain = parts[0]
+                cookie_name = parts[5]
+                if ("douyin.com" in domain) and ("iesdouyin.com" not in domain):
+                    essential_keys = [
+                        "sessionid", "sessionid_ss", "uid_tt", "uid_tt_ss",
+                        "sid_tt", "passport_csrf_token", "__ac_nonce", "__ac_signature"
+                    ]
+                    if cookie_name in essential_keys:
+                        cloned_parts = list(parts)
+                        cloned_parts[0] = ".iesdouyin.com"
+                        cloned_parts[1] = "TRUE"  # Enforce domain_specified flag to match dot prefix for cookiejar compatibility
+                        cloned_lines.append("\t".join(cloned_parts))
+
+        cleaned_lines.extend(cloned_lines)
+        final_cookies_text = "# Netscape HTTP Cookie File\n" + "\n".join(cleaned_lines) + "\n"
+
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(final_cookies_text)
+        logger.info(f"Successfully sanitized and bridged cookies in {file_path}")
+    except Exception as e:
+        logger.error(f"Failed to sanitize and bridge cookies file: {str(e)}")
+
+
+def extract_http_url(text: str) -> str:
+    """Extracts the first HTTP/HTTPS URL from a string."""
+    pattern = r'https?://[^\s/$.?#].[^\s]*'
+    match = re.search(pattern, text)
+    if not match:
+        raise ValueError("No valid URL found in the input text")
+    return match.group(0)
+
+
+def clean_error_message(error_msg: str) -> str:
+    """Strips ANSI escape characters and converts common yt-dlp errors to friendly Chinese messages."""
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    cleaned = ansi_escape.sub('', error_msg)
+
+    if "Fresh cookies (not necessarily logged in) are needed" in cleaned:
+        return "解析失败：该平台（抖音/TikTok）目前强化了防爬虫限制，需要有效的 Cookie。请获取您浏览器的 Netscape 格式 Cookie 并保存到项目根目录下的 cookies.txt 文件中。"
+    if "Unsupported URL" in cleaned:
+        return "解析失败：暂不支持该链接，请确认输入的是抖音（Douyin）或 TikTok 的有效视频分享链接。"
+    if "Your IP address is blocked" in cleaned or "HTTP Error 403" in cleaned:
+        return "解析失败：服务器 IP 被平台暂时封禁/限制访问，请尝试配置代理或在 cookies.txt 中加入 Cookie 凭证。"
+
+    return f"解析失败：{cleaned}"
+
+
+# ==========================================
+# Cookie Initialization (after functions are defined)
+# ==========================================
+
 # Dynamically generate cookies.txt from environment variable if provided
 if COOKIES_CONTENT:
     try:
         cleaned_cookies = COOKIES_CONTENT.replace("\\n", "\n").replace("\\t", "\t").strip()
         if "Netscape HTTP Cookie File" not in cleaned_cookies:
             cleaned_cookies = "# Netscape HTTP Cookie File\n" + cleaned_cookies
-            
+
         with open("cookies.txt", "w", encoding="utf-8") as f:
             f.write(cleaned_cookies + "\n")
-            
+
         # Clean, reconstruct columns, and bridge to iesdouyin.com domain
         sanitize_and_bridge_cookies("cookies.txt")
         logger.info("Successfully loaded, generated and bridged cookies.txt from environment variable.")
     except Exception as e:
         logger.error(f"Failed to create cookies.txt from environment variable: {str(e)}")
+
+
+# ==========================================
+# Bot Initialization
+# ==========================================
 
 bot = None
 if TG_BOT_TOKEN:
@@ -53,6 +174,11 @@ if TG_BOT_TOKEN:
     logger.info("Telegram Bot Async instance initialized.")
 else:
     logger.warning("TELEGRAM_BOT_TOKEN is not set. Telegram Bot functions will be inactive.")
+
+
+# ==========================================
+# Pydantic Models
+# ==========================================
 
 class ParseRequest(BaseModel):
     url: str = Field(..., description="The TikTok or Douyin video URL, or share text containing the URL")
@@ -68,109 +194,10 @@ class VideoMetadata(BaseModel):
     raw_video_url: str  # 原始的 CDN 直连链接
     extractor: str
 
-def sanitize_and_bridge_cookies(file_path: str):
-    """Reads a cookie file, fixes wrapped lines, standardizes columns to tabs, clones douyin.com keys to iesdouyin.com, and writes it back."""
-    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        return
-        
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            content = f.read()
-            
-        raw_lines = content.strip().split('\n')
-        combined_lines = []
-        
-        # Phase 1: Merge wrapped lines
-        for line in raw_lines:
-            line_stripped = line.strip()
-            if not line_stripped:
-                continue
-            if line_stripped.startswith("#"):
-                combined_lines.append(line_stripped)
-                continue
-            
-            is_new_cookie = False
-            first_word = line_stripped.split()[0] if line_stripped.split() else ""
-            if first_word.startswith(".") or "douyin.com" in first_word or "tiktok.com" in first_word:
-                is_new_cookie = True
-                
-            if is_new_cookie:
-                combined_lines.append(line_stripped)
-            else:
-                if combined_lines and not combined_lines[-1].startswith("#"):
-                    prev_line = combined_lines[-1]
-                    if prev_line[-1].isspace() or line_stripped[0].isspace():
-                        combined_lines[-1] = prev_line + line_stripped
-                    else:
-                        combined_lines[-1] = prev_line + " " + line_stripped
-                else:
-                    combined_lines.append(line_stripped)
-                    
-        # Phase 2: Convert to tab separation, clone keys to iesdouyin.com
-        cleaned_lines = []
-        cloned_lines = []
-        for line in combined_lines:
-            if line.startswith("#"):
-                cleaned_lines.append(line)
-                continue
-            
-            parts = line.split('\t')
-            if len(parts) < 3:
-                parts = re.split(r'\s+', line)
-                
-            if len(parts) == 6:
-                parts.append("")
-                
-            if len(parts) == 7:
-                # Force domain_specified flag to perfectly align with dot prefix to satisfy python's cookiejar assert
-                starts_with_dot = parts[0].startswith(".")
-                parts[1] = "TRUE" if starts_with_dot else "FALSE"
-                cleaned_lines.append("\t".join(parts))
-                
-                # Clone to iesdouyin.com
-                domain = parts[0]
-                cookie_name = parts[5]
-                if ("douyin.com" in domain) and ("iesdouyin.com" not in domain):
-                    essential_keys = [
-                        "sessionid", "sessionid_ss", "uid_tt", "uid_tt_ss", 
-                        "sid_tt", "passport_csrf_token", "__ac_nonce", "__ac_signature"
-                    ]
-                    if cookie_name in essential_keys:
-                        cloned_parts = list(parts)
-                        cloned_parts[0] = ".iesdouyin.com"
-                        cloned_parts[1] = "TRUE"  # Enforce domain_specified flag to match dot prefix for cookiejar compatibility
-                        cloned_lines.append("\t".join(cloned_parts))
-            
-        cleaned_lines.extend(cloned_lines)
-        final_cookies_text = "# Netscape HTTP Cookie File\n" + "\n".join(cleaned_lines) + "\n"
-        
-        with open(file_path, "w", encoding="utf-8") as f:
-            f.write(final_cookies_text)
-        logger.info(f"Successfully sanitized and bridged cookies in {file_path}")
-    except Exception as e:
-        logger.error(f"Failed to sanitize and bridge cookies file: {str(e)}")
 
-def extract_http_url(text: str) -> str:
-    """Extracts the first HTTP/HTTPS URL from a string."""
-    pattern = r'https?://[^\s/$.?#].[^\s]*'
-    match = re.search(pattern, text)
-    if not match:
-        raise ValueError("No valid URL found in the input text")
-    return match.group(0)
-
-def clean_error_message(error_msg: str) -> str:
-    """Strips ANSI escape characters and converts common yt-dlp errors to friendly Chinese messages."""
-    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-    cleaned = ansi_escape.sub('', error_msg)
-    
-    if "Fresh cookies (not necessarily logged in) are needed" in cleaned:
-        return "解析失败：该平台（抖音/TikTok）目前强化了防爬虫限制，需要有效的 Cookie。请获取您浏览器的 Netscape 格式 Cookie 并保存到项目根目录下的 cookies.txt 文件中。"
-    if "Unsupported URL" in cleaned:
-        return "解析失败：暂不支持该链接，请确认输入的是抖音（Douyin）或 TikTok 的有效视频分享链接。"
-    if "Your IP address is blocked" in cleaned or "HTTP Error 403" in cleaned:
-        return "解析失败：服务器 IP 被平台暂时封禁/限制访问，请尝试配置代理或在 cookies.txt 中加入 Cookie 凭证。"
-        
-    return f"解析失败：{cleaned}"
+# ==========================================
+# Video Parsing Logic
+# ==========================================
 
 def parse_video_fallback(url: str) -> dict:
     """Fallback parser that queries a public Evil0ctal API instance when local yt-dlp fails."""
@@ -179,26 +206,26 @@ def parse_video_fallback(url: str) -> dict:
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
-    
+
     req = urllib.request.Request(api_url, headers=headers)
     # Perform synchronous request with timeout
     with urllib.request.urlopen(req, timeout=12) as resp:
         data = json.loads(resp.read().decode('utf-8'))
-        
+
     if data.get('code') != 200 or 'data' not in data:
         status_msg = data.get('msg') or data.get('message') or 'Unknown error'
         raise ValueError(f"Fallback API failed: {status_msg}")
-        
+
     video_data = data['data']
     video = video_data.get('video', {})
-    
+
     # Extract play URL from play_addr list
     play_addr_list = video.get('play_addr', {}).get('url_list', [])
     if not play_addr_list:
         raise ValueError("No playable CDN streams returned by fallback API")
-        
+
     video_url = play_addr_list[0]
-    
+
     metadata = {
         'id': video_data.get('aweme_id') or '',
         'title': video_data.get('desc') or 'No Title',
@@ -209,11 +236,12 @@ def parse_video_fallback(url: str) -> dict:
         'raw_video_url': video_url,
         'extractor': 'Douyin' if 'douyin.com' in video_url or 'amemv.com' in video_url else 'TikTok'
     }
-    
+
     return {
         'metadata': metadata,
         'cookie_header': ''  # Fallback uses hosted proxies; cookies are handled upstream
     }
+
 
 def parse_video_pearktrue(url: str) -> dict:
     """Second fallback parser that queries pearktrue public API."""
@@ -222,21 +250,21 @@ def parse_video_pearktrue(url: str) -> dict:
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
-    
+
     try:
         req = urllib.request.Request(api_url, headers=headers)
         with urllib.request.urlopen(req, timeout=12) as resp:
             data = json.loads(resp.read().decode('utf-8'))
-            
+
         if data.get('code') != 200 or 'data' not in data:
             status_msg = data.get('msg') or data.get('message') or 'Unknown error'
             raise ValueError(f"PearkTrue API returned error status: {status_msg}")
-            
+
         video_data = data['data']
         video_url = video_data.get('video')
         if not video_url:
             raise ValueError("No video URL returned by PearkTrue API")
-            
+
         metadata = {
             'id': '',
             'title': video_data.get('title') or 'No Title',
@@ -247,7 +275,7 @@ def parse_video_pearktrue(url: str) -> dict:
             'raw_video_url': video_url,
             'extractor': 'Douyin'
         }
-        
+
         return {
             'metadata': metadata,
             'cookie_header': ''
@@ -255,6 +283,151 @@ def parse_video_pearktrue(url: str) -> dict:
     except Exception as e:
         logger.error(f"PearkTrue API connection or parse error: {str(e)}")
         raise e
+
+
+def parse_video_mobile_html(url: str) -> dict:
+    """Fallback parser that extracts no-watermark video directly from Douyin mobile sharing HTML without cookies."""
+    logger.info(f"Using Mobile HTML scraper fallback for URL: {url}")
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
+    }
+
+    try:
+        # Step 1: Follow redirects to get real URL
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            final_url = resp.geturl()
+            html = resp.read().decode('utf-8')
+
+        logger.info(f"Redirected to: {final_url}")
+
+        # Step 2: Extract aweme_id
+        video_id_match = re.search(r'video/(\d+)', final_url)
+        if not video_id_match:
+            video_id_match = re.search(r'video/(\d+)', html)
+
+        video_id = video_id_match.group(1) if video_id_match else ""
+        if not video_id:
+            raise ValueError("Could not extract video ID from redirects")
+
+        # Step 3: Parse RENDER_DATA from HTML if present
+        render_data_match = re.search(r'<script id="RENDER_DATA" type="application/json">([^<]+)</script>', html)
+        if render_data_match:
+            render_data_json = urllib.parse.unquote(render_data_match.group(1))
+            data = json.loads(render_data_json)
+
+            def find_play_addr(obj):
+                if isinstance(obj, dict):
+                    if 'play_addr' in obj and isinstance(obj['play_addr'], dict):
+                        url_list = obj['play_addr'].get('url_list', [])
+                        if url_list:
+                            return url_list[0]
+                    for k, v in obj.items():
+                        res = find_play_addr(v)
+                        if res:
+                            return res
+                elif isinstance(obj, list):
+                    for item in obj:
+                        res = find_play_addr(item)
+                        if res:
+                            return res
+                return None
+
+            video_url = find_play_addr(data)
+            if video_url:
+                no_watermark_url = video_url.replace("playwm", "play")
+                if no_watermark_url.startswith("//"):
+                    no_watermark_url = "https:" + no_watermark_url
+
+                def find_key(obj, target_key):
+                    if isinstance(obj, dict):
+                        if target_key in obj:
+                            return obj[target_key]
+                        for k, v in obj.items():
+                            res = find_key(v, target_key)
+                            if res is not None:
+                                return res
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            res = find_key(item, target_key)
+                            if res is not None:
+                                return res
+                    return None
+
+                title = find_key(data, 'desc') or 'No Title'
+                nickname = find_key(data, 'nickname') or 'Unknown'
+                cover = find_key(data, 'cover')
+                cover_url = cover.get('url_list', [''])[0] if isinstance(cover, dict) and cover.get('url_list') else ''
+
+                metadata = {
+                    'id': video_id,
+                    'title': title,
+                    'description': title,
+                    'thumbnail': cover_url,
+                    'uploader': nickname,
+                    'duration': 0.0,
+                    'raw_video_url': no_watermark_url,
+                    'extractor': 'Douyin'
+                }
+                return {
+                    'metadata': metadata,
+                    'cookie_header': ''
+                }
+
+        # Scraper regex fallback
+        play_addr_match = re.search(r'"playAddr"\s*:\s*"([^"]+)"', html)
+        if not play_addr_match:
+            play_addr_match = re.search(r'playwm[^"]+', html)
+            if play_addr_match:
+                matched_str = play_addr_match.group(0)
+                if matched_str.startswith("//"):
+                    matched_str = "https:" + matched_str
+                play_addr_match = re.match(r'[^\\\s]+', matched_str)
+
+        if play_addr_match:
+            video_url = play_addr_match.group(1) if len(play_addr_match.groups()) > 0 else play_addr_match.group(0)
+            video_url = video_url.replace('\\u002F', '/').replace('\\/', '/')
+            if video_url.startswith("//"):
+                video_url = "https:" + video_url
+
+            no_watermark_url = video_url.replace("playwm", "play")
+
+            # Try to extract title and nickname from HTML via regex
+            title = "无水印视频"
+            title_match = re.search(r'<title>([^<]+)</title>', html)
+            if title_match:
+                title = title_match.group(1).replace(" - 抖音", "").replace(" - 抖音手机网页版", "").strip()
+
+            nickname = "未知作者"
+            nickname_match = re.search(r'"nickname"\s*:\s*"([^"]+)"', html)
+            if not nickname_match:
+                nickname_match = re.search(r'<p class="[^\"]*nickname[^\"]*">([^<]+)</p>', html)
+            if nickname_match:
+                nickname = nickname_match.group(1).strip()
+
+            metadata = {
+                'id': video_id,
+                'title': title,
+                'description': title,
+                'thumbnail': '',
+                'uploader': nickname,
+                'duration': 0.0,
+                'raw_video_url': no_watermark_url,
+                'extractor': 'Douyin'
+            }
+            return {
+                'metadata': metadata,
+                'cookie_header': ''
+            }
+
+        raise ValueError("Could not find any video play address in mobile HTML")
+    except Exception as e:
+        logger.error(f"Mobile HTML scraper failed: {str(e)}")
+        raise e
+
 
 def parse_video(url: str) -> dict:
     """Uses yt-dlp to extract video metadata and direct URL along with session cookies."""
@@ -272,7 +445,7 @@ def parse_video(url: str) -> dict:
             'Sec-Ch-Ua-Platform': '"Windows"',
         }
     }
-    
+
     # Use cookies if available
     cookies_path = 'cookies.txt'
     if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
@@ -280,33 +453,33 @@ def parse_video(url: str) -> dict:
         sanitize_and_bridge_cookies(cookies_path)
         ydl_opts['cookiefile'] = cookies_path
         logger.info(f"Using sanitized and bridged cookies from {cookies_path}")
-        
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            
+
             if 'entries' in info:
                 entries = list(info['entries'])
                 if not entries:
                     raise ValueError("No video entries found in the URL")
                 info = entries[0]
-                
+
             video_url = info.get('url')
-            
+
             if not video_url and info.get('formats'):
                 formats = info.get('formats', [])
                 valid_formats = [f for f in formats if f.get('url')]
                 if valid_formats:
                     video_url = valid_formats[-1]['url']
-                    
+
             if not video_url:
                 raise ValueError("Could not extract a direct video download URL")
-            
+
             cookies = []
             for c in ydl.cookiejar:
                 cookies.append(f"{c.name}={c.value}")
             cookie_header = "; ".join(cookies)
-                
+
             metadata = {
                 'id': info.get('id') or '',
                 'title': info.get('title') or info.get('description') or 'No Title',
@@ -317,23 +490,32 @@ def parse_video(url: str) -> dict:
                 'raw_video_url': video_url,
                 'extractor': info.get('extractor') or ''
             }
-            
+
             return {
                 'metadata': metadata,
                 'cookie_header': cookie_header
             }
     except Exception as e:
-        logger.warning(f"Local yt-dlp parsing failed: {str(e)}. Swapping to fallback API 1 (douyin.wtf)...")
+        logger.warning(f"Local yt-dlp parsing failed: {str(e)}. Swapping to fallback 1 (Mobile HTML Scraper)...")
         try:
-            return parse_video_fallback(url)
-        except Exception as fallback_err:
-            logger.warning(f"Fallback 1 failed: {str(fallback_err)}. Swapping to fallback API 2 (pearktrue)...")
+            return parse_video_mobile_html(url)
+        except Exception as mobile_err:
+            logger.warning(f"Fallback 1 (Mobile HTML Scraper) failed: {str(mobile_err)}. Swapping to fallback 2 (douyin.wtf)...")
             try:
-                return parse_video_pearktrue(url)
-            except Exception as fallback_err_2:
-                logger.error(f"All fallback parsers failed. Fallback 1: {str(fallback_err)}. Fallback 2: {str(fallback_err_2)}")
-                # Raise original error to represent the primary failure reason
-                raise e
+                return parse_video_fallback(url)
+            except Exception as fallback_err_1:
+                logger.warning(f"Fallback 2 (douyin.wtf) failed: {str(fallback_err_1)}. Swapping to fallback 3 (pearktrue)...")
+                try:
+                    return parse_video_pearktrue(url)
+                except Exception as fallback_err_2:
+                    logger.error(f"All fallback parsers failed. Mobile: {str(mobile_err)}. WTF: {str(fallback_err_1)}. PearkTrue: {str(fallback_err_2)}")
+                    # Raise original error to represent the primary failure reason
+                    raise e
+
+
+# ==========================================
+# FastAPI Routes
+# ==========================================
 
 @app.get("/")
 async def serve_ui():
@@ -359,20 +541,20 @@ async def parse(request: Request, req_body: ParseRequest):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e)
         )
-        
+
     try:
         result = parse_video(target_url)
         metadata = result['metadata']
         cookie_header = result['cookie_header']
-        
+
         # Build the proxy streaming URL
         encoded_cdn_url = urllib.parse.quote(metadata['raw_video_url'])
         encoded_cookies = urllib.parse.quote(cookie_header)
         encoded_orig_url = urllib.parse.quote(target_url)
-        
+
         # Build the proxy URL dynamically based on the request host
         proxy_url = f"{request.base_url}stream?url={encoded_cdn_url}&cookies={encoded_cookies}&referer={encoded_orig_url}"
-        
+
         metadata['video_url'] = proxy_url
         return metadata
     except Exception as e:
@@ -401,14 +583,14 @@ async def stream_video(
         req_referer = "https://www.tiktok.com/"
         if "douyin.com" in url or "amemv.com" in url:
             req_referer = "https://www.douyin.com/"
-        
+
     headers = {
         "Referer": req_referer,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
     }
     if cookies:
         headers["Cookie"] = cookies
-        
+
     async def video_streamer():
         async with httpx.AsyncClient(follow_redirects=True) as client:
             try:
@@ -421,7 +603,7 @@ async def stream_video(
             except Exception as e:
                 logger.error(f"Error during video streaming proxy: {str(e)}")
                 return
-                
+
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             r = await client.head(url, headers=headers)
@@ -431,13 +613,13 @@ async def stream_video(
         logger.warning(f"Failed to fetch metadata headers for proxy streaming: {str(e)}")
         content_type = "video/mp4"
         content_length = None
-        
+
     response_headers = {}
     if content_length:
         response_headers["Content-Length"] = content_length
     if download:
         response_headers["Content-Disposition"] = "attachment; filename=\"video.mp4\""
-        
+
     return StreamingResponse(
         video_streamer(),
         media_type=content_type,
@@ -453,13 +635,13 @@ async def self_keep_alive():
     """Background task to ping itself and keep Render instance alive."""
     if not RENDER_EXTERNAL_URL:
         return
-    
+
     url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/health"
     logger.info(f"Self keep-alive task started. Target: {url}")
-    
+
     # Wait for service startup to stabilize
     await asyncio.sleep(60)
-    
+
     while True:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -467,7 +649,7 @@ async def self_keep_alive():
                 logger.info(f"Self-ping keep-alive status: {r.status_code}")
         except Exception as e:
             logger.warning(f"Self-ping keep-alive failed: {str(e)}")
-        
+
         # Render sleeps after 15 mins of inactivity. Ping every 10 mins (600s).
         await asyncio.sleep(600)
 
@@ -508,6 +690,7 @@ async def tg_webhook(token: str, request: Request):
     except Exception as e:
         logger.error(f"Error processing Telegram update: {str(e)}")
         return {"status": "error", "message": str(e)}
+
 
 # Define Bot handlers only if bot is initialized
 if bot:
@@ -568,11 +751,11 @@ if bot:
                 temp_path = temp_video.name
 
             try:
-                async with httpx.AsyncClient(follow_redirects=True, timeout=45.0) as client:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
                     async with client.stream("GET", raw_cdn_url, headers=headers) as r:
                         if r.status_code >= 400:
                             raise ValueError(f"Download failed from CDN, HTTP {r.status_code}")
-                        
+
                         content_length = r.headers.get("content-length")
                         file_size = int(content_length) if content_length else 0
 
@@ -620,13 +803,13 @@ if bot:
 
             except Exception as dl_upload_err:
                 logger.warning(f"Failed to post video directly: {str(dl_upload_err)}")
-                
+
                 # Build download link using fallback configuration (RENDER_EXTERNAL_URL)
                 base_url = RENDER_EXTERNAL_URL.rstrip('/') + '/' if RENDER_EXTERNAL_URL else "http://localhost:8000/"
                 encoded_cdn = urllib.parse.quote(raw_cdn_url)
                 encoded_cookies = urllib.parse.quote(cookie_header)
                 encoded_orig = urllib.parse.quote(target_url)
-                
+
                 proxy_download_url = f"{base_url}stream?url={encoded_cdn}&cookies={encoded_cookies}&referer={encoded_orig}&download=1"
 
                 fallback_text = (
@@ -674,7 +857,7 @@ if bot:
                         os.remove(temp_path)
                     except Exception as cleanup_err:
                         logger.error(f"Failed to remove temp file: {str(cleanup_err)}")
-                        
+
         except Exception as parse_error:
             logger.error(f"Bot handler parse error: {str(parse_error)}")
             error_msg = clean_error_message(str(parse_error))
