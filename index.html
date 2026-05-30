@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Snaptok - 抖音/TikTok 无水印视频解析下载</title>
+    <meta name="description" content="极速、实时的 抖音 (Douyin) & TikTok 无水印视频在线解析下载工具，支持一键下载高清无水印视频。">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0b0e;
+            --card-bg: rgba(18, 18, 24, 0.65);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --text-primary: #f4f4f9;
+            --text-secondary: #9494a6;
+            --text-muted: #5e5e6e;
+            
+            --primary: #00f2fe;
+            --secondary: #f093fb;
+            --accent: #4facfe;
+            --success: #10b981;
+            
+            --neon-gradient: linear-gradient(135deg, #00f2fe 0%, #4facfe 50%, #f093fb 100%);
+            --button-gradient: linear-gradient(135deg, #00f2fe 0%, #4facfe 100%);
+            --button-gradient-hover: linear-gradient(135deg, #00f2fe 0%, #f093fb 100%);
+            --tiktok-gradient: linear-gradient(135deg, #ff0050 0%, #00f2fe 100%);
+            
+            --primary-glow: rgba(0, 242, 254, 0.35);
+            --card-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+            --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow-x: hidden;
+            position: relative;
+        }
+
+        /* Ambient background glow */
+        body::before {
+            content: '';
+            position: absolute;
+            top: -200px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, rgba(0, 242, 254, 0.08) 0%, rgba(240, 147, 251, 0.04) 50%, transparent 100%);
+            z-index: -1;
+            pointer-events: none;
+            filter: blur(80px);
+        }
+
+        body::after {
+            content: '';
+            position: absolute;
+            bottom: -150px;
+            left: 10%;
+            width: 400px;
+            height: 400px;
+            background: radial-gradient(circle, rgba(79, 172, 254, 0.06) 0%, transparent 80%);
+            z-index: -1;
+            pointer-events: none;
+            filter: blur(60px);
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            padding: 40px 20px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 30px;
+        }
+
+        /* Header design */
+        header {
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
+        .logo {
+            font-family: 'Outfit', sans-serif;
+            font-size: 2.8rem;
+            font-weight: 800;
+            letter-spacing: -1px;
+            background: var(--neon-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: inline-block;
+            margin-bottom: 8px;
+            position: relative;
+        }
+
+        .logo::after {
+            content: 'API Inside';
+            position: absolute;
+            right: -60px;
+            bottom: 8px;
+            font-size: 0.65rem;
+            font-family: 'Inter', sans-serif;
+            letter-spacing: 1px;
+            font-weight: 600;
+            text-transform: uppercase;
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-secondary);
+            padding: 2px 6px;
+            border-radius: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            -webkit-text-fill-color: var(--text-secondary);
+        }
+
+        .subtitle {
+            color: var(--text-secondary);
+            font-size: 1rem;
+            font-weight: 400;
+            max-width: 450px;
+            margin: 0 auto;
+            line-height: 1.5;
+        }
+
+        /* Glassmorphic Cards */
+        .glass-card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 20px;
+            padding: 30px;
+            backdrop-filter: blur(16px) saturate(180%);
+            -webkit-backdrop-filter: blur(16px) saturate(180%);
+            box-shadow: var(--card-shadow);
+            transition: var(--transition);
+        }
+
+        .glass-card:hover {
+            border-color: rgba(255, 255, 255, 0.12);
+        }
+
+        /* Form Controls */
+        .parser-form {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .input-group {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .input-icon {
+            position: absolute;
+            left: 18px;
+            color: var(--text-muted);
+            pointer-events: none;
+            width: 20px;
+            height: 20px;
+            transition: var(--transition);
+        }
+
+        .url-input {
+            width: 100%;
+            padding: 18px 18px 18px 52px;
+            background-color: rgba(0, 0, 0, 0.3);
+            border: 1.5px solid var(--card-border);
+            border-radius: 14px;
+            color: var(--text-primary);
+            font-size: 1.05rem;
+            outline: none;
+            font-family: 'Inter', sans-serif;
+            transition: var(--transition);
+        }
+
+        .url-input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 20px var(--primary-glow);
+            background-color: rgba(0, 0, 0, 0.4);
+        }
+
+        .url-input:focus + .input-icon {
+            color: var(--primary);
+        }
+
+        .submit-btn {
+            background: var(--button-gradient);
+            border: none;
+            border-radius: 14px;
+            color: #050508;
+            font-size: 1.1rem;
+            font-weight: 600;
+            padding: 18px;
+            cursor: pointer;
+            transition: var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 4px 15px rgba(0, 242, 254, 0.25);
+        }
+
+        .submit-btn:hover {
+            background: var(--button-gradient-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 242, 254, 0.4);
+        }
+
+        .submit-btn:active {
+            transform: translateY(0);
+        }
+
+        /* Loading spinner */
+        .spinner {
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(5, 5, 8, 0.2);
+            border-top: 3px solid #050508;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            display: none;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .btn-text {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        /* Result Panel Styling */
+        #result-panel {
+            display: none;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        #result-panel.show {
+            display: block;
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        .video-container {
+            display: grid;
+            grid-template-columns: 220px 1fr;
+            gap: 25px;
+        }
+
+        @media (max-width: 600px) {
+            .video-container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .video-cover-wrapper {
+            position: relative;
+            aspect-ratio: 9 / 16;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            background-color: #000;
+            max-height: 380px;
+            margin: 0 auto;
+            width: 100%;
+            max-width: 220px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+        }
+
+        .video-cover {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .duration-tag {
+            position: absolute;
+            bottom: 12px;
+            right: 12px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #fff;
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            backdrop-filter: blur(4px);
+        }
+
+        .video-info {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            gap: 20px;
+        }
+
+        .video-details {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .video-title {
+            font-size: 1.25rem;
+            font-weight: 600;
+            line-height: 1.4;
+            color: var(--text-primary);
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .author-box {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+
+        .author-icon {
+            width: 16px;
+            height: 16px;
+            color: var(--accent);
+        }
+
+        .platform-badge {
+            align-self: flex-start;
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 20px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .platform-tiktok {
+            background: rgba(255, 0, 80, 0.1);
+            color: #ff0050;
+            border-color: rgba(255, 0, 80, 0.2);
+        }
+
+        .platform-douyin {
+            background: rgba(0, 242, 254, 0.1);
+            color: #00f2fe;
+            border-color: rgba(0, 242, 254, 0.2);
+        }
+
+        /* Action Buttons Grid */
+        .actions-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        @media (max-width: 480px) {
+            .actions-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .action-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 14px;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: var(--transition);
+            border: none;
+            text-decoration: none;
+        }
+
+        .btn-download {
+            background: var(--button-gradient);
+            color: #050508;
+            box-shadow: 0 4px 10px rgba(0, 242, 254, 0.15);
+        }
+
+        .btn-download:hover {
+            background: var(--button-gradient-hover);
+            transform: translateY(-2px);
+        }
+
+        .btn-preview {
+            background: rgba(255, 255, 255, 0.06);
+            color: var(--text-primary);
+            border: 1px solid var(--card-border);
+        }
+
+        .btn-preview:hover {
+            background: rgba(255, 255, 255, 0.12);
+            border-color: rgba(255, 255, 255, 0.2);
+            transform: translateY(-2px);
+        }
+
+        .btn-copy {
+            grid-column: span 2;
+            background: rgba(0, 242, 254, 0.05);
+            border: 1px solid rgba(0, 242, 254, 0.15);
+            color: var(--primary);
+        }
+
+        @media (max-width: 480px) {
+            .btn-copy {
+                grid-column: span 1;
+            }
+        }
+
+        .btn-copy:hover {
+            background: rgba(0, 242, 254, 0.12);
+            border-color: rgba(0, 242, 254, 0.3);
+            transform: translateY(-2px);
+        }
+
+        /* History Section */
+        .history-section {
+            margin-top: 10px;
+        }
+
+        .history-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .history-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            font-family: 'Outfit', sans-serif;
+        }
+
+        .clear-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            transition: var(--transition);
+        }
+
+        .clear-btn:hover {
+            color: #ef4444;
+        }
+
+        .history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            max-height: 280px;
+            overflow-y: auto;
+            padding-right: 5px;
+        }
+
+        /* Scrollbar styles */
+        .history-list::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .history-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .history-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+
+        .history-item {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 10px;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+
+        .history-item:hover {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(255, 255, 255, 0.08);
+            transform: translateX(3px);
+        }
+
+        .history-thumb {
+            width: 40px;
+            height: 40px;
+            border-radius: 6px;
+            object-fit: cover;
+            background-color: #000;
+        }
+
+        .history-details {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .history-item-title {
+            font-size: 0.9rem;
+            font-weight: 500;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-bottom: 4px;
+        }
+
+        .history-item-meta {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .empty-history {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            padding: 30px;
+            border: 1px dashed rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+        }
+
+        footer {
+            text-align: center;
+            padding: 30px 20px;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            letter-spacing: 0.5px;
+            margin-top: auto;
+        }
+
+        /* Toast notification */
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%) translateY(100px);
+            background: var(--card-bg);
+            border: 1px solid var(--primary);
+            color: var(--text-primary);
+            padding: 12px 24px;
+            border-radius: 30px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            box-shadow: 0 10px 25px rgba(0, 242, 254, 0.15);
+            backdrop-filter: blur(8px);
+            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            opacity: 0;
+            z-index: 1000;
+        }
+
+        .toast.show {
+            transform: translateX(-50%) translateY(0);
+            opacity: 1;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <h1 class="logo">Snaptok</h1>
+            <p class="subtitle">抖音/TikTok 高清无水印视频在线解析下载工具，粘贴视频分享链接即可一键提取。</p>
+        </header>
+
+        <!-- Main Parser Form Card -->
+        <main class="glass-card">
+            <form id="parse-form" class="parser-form" onsubmit="handleParse(event)">
+                <div class="input-group">
+                    <svg class="input-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                    </svg>
+                    <input type="text" id="video-url" class="url-input" placeholder="粘贴抖音/TikTok分享文本或视频链接..." required autocomplete="off">
+                </div>
+                <button type="submit" id="submit-btn" class="submit-btn">
+                    <span class="spinner" id="spinner"></span>
+                    <span class="btn-text" id="btn-text">
+                        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"></path>
+                        </svg>
+                        解析视频
+                    </span>
+                </button>
+            </form>
+        </main>
+
+        <!-- Parse Result Panel -->
+        <section id="result-panel" class="glass-card">
+            <div class="video-container">
+                <div class="video-cover-wrapper">
+                    <img id="res-cover" src="" alt="视频封面" class="video-cover">
+                    <span id="res-duration" class="duration-tag">00:00</span>
+                </div>
+                <div class="video-info">
+                    <div class="video-details">
+                        <span id="res-platform" class="platform-badge">TIKTOK</span>
+                        <h2 id="res-title" class="video-title">视频标题</h2>
+                        <div class="author-box">
+                            <svg class="author-icon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z"></path>
+                            </svg>
+                            <span id="res-author">作者名字</span>
+                        </div>
+                    </div>
+                    
+                    <div class="actions-grid">
+                        <a id="download-btn" href="" class="action-btn btn-download" download>
+                            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3"></path>
+                            </svg>
+                            立即下载
+                        </a>
+                        <a id="preview-btn" href="" target="_blank" class="action-btn btn-preview">
+                            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M5.25 5.653c0-.856.917-1.398 1.667-.986l11.54 6.347a1.125 1.125 0 0 1 0 1.972l-11.54 6.347a1.125 1.125 0 0 1-1.667-.986V5.653Z"></path>
+                            </svg>
+                            在线播放
+                        </a>
+                        <button onclick="copyDownloadLink()" class="action-btn btn-copy">
+                            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 7.5V6.108c0-1.135.845-2.098 1.976-2.192.373-.03.748-.057 1.123-.08M15.75 18H18a2.25 2.25 0 0 0 2.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 0 0-1.123-.08M15.75 18.75v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5A3.375 3.375 0 0 0 6.375 7.5H5.25m11.9-3.664A2.251 2.251 0 0 0 15 2.25h-1.5a2.251 2.251 0 0 0-2.15 1.586m5.8 0c.065.21.1.433.1.664v.75h-6V4.5c0-.231.035-.454.1-.664M6.75 7.5H4.875c-.621 0-1.125.504-1.125 1.125v4.125c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V8.625c0-.621-.504-1.125-1.125-1.125H12"></path>
+                            </svg>
+                            复制无水印下载链接
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Parse History Card -->
+        <section class="glass-card history-section">
+            <div class="history-header">
+                <h2 class="history-title">解析历史</h2>
+                <button onclick="clearHistory()" class="clear-btn" id="clear-btn" style="display: none;">
+                    <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.34 9m-4.78 0L9 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"></path>
+                    </svg>
+                    清空记录
+                </button>
+            </div>
+            <div class="history-list" id="history-list">
+                <div class="empty-history">暂无解析记录</div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer>
+            <p>&copy; 2026 Snaptok. Built with FastAPI + yt-dlp.</p>
+        </footer>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast">复制成功!</div>
+
+    <script>
+        let currentVideoUrl = '';
+
+        // Load History on Page Load
+        document.addEventListener('DOMContentLoaded', () => {
+            renderHistory();
+        });
+
+        // Format duration helper (sec to mm:ss)
+        function formatDuration(seconds) {
+            if (!seconds) return '00:00';
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        // Show Toast Notification
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, 2500);
+        }
+
+        // Parse Form Handler
+        async function handleParse(event) {
+            event.preventDefault();
+            const urlInput = document.getElementById('video-url');
+            const submitBtn = document.getElementById('submit-btn');
+            const spinner = document.getElementById('spinner');
+            const btnText = document.getElementById('btn-text');
+            const resultPanel = document.getElementById('result-panel');
+            
+            const rawUrl = urlInput.value.trim();
+            if (!rawUrl) return;
+
+            // Update UI to loading state
+            submitBtn.disabled = true;
+            spinner.style.display = 'block';
+            btnText.style.visibility = 'hidden';
+            
+            try {
+                const response = await fetch('/parse', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ url: rawUrl })
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    throw new Error(data.detail || '解析失败，请检查链接是否正确');
+                }
+
+                // Populate UI results
+                document.getElementById('res-cover').src = data.thumbnail;
+                document.getElementById('res-duration').textContent = formatDuration(data.duration);
+                document.getElementById('res-title').textContent = data.title;
+                document.getElementById('res-author').textContent = data.uploader;
+                
+                // Platforms
+                const platformBadge = document.getElementById('res-platform');
+                platformBadge.textContent = data.extractor;
+                platformBadge.className = 'platform-badge'; // Reset classes
+                if (data.extractor.toLowerCase().includes('tiktok')) {
+                    platformBadge.classList.add('platform-tiktok');
+                } else {
+                    platformBadge.classList.add('platform-douyin');
+                }
+
+                // Set download & preview link with download flag
+                currentVideoUrl = data.video_url;
+                document.getElementById('download-btn').href = `${data.video_url}&download=1`;
+                document.getElementById('preview-btn').href = data.video_url;
+
+                // Display result panel
+                resultPanel.style.display = 'block';
+                // Trigger smooth slide-in/fade-in animation
+                setTimeout(() => {
+                    resultPanel.classList.add('show');
+                }, 50);
+
+                // Add to history
+                saveToHistory(data);
+
+                // Clear input
+                urlInput.value = '';
+
+            } catch (error) {
+                console.error('Parse Error:', error);
+                alert(error.message || '网络连接错误，请稍后再试');
+            } finally {
+                // Restore button state
+                submitBtn.disabled = false;
+                spinner.style.display = 'none';
+                btnText.style.visibility = 'visible';
+            }
+        }
+
+        // Copy download URL
+        function copyDownloadLink() {
+            if (!currentVideoUrl) return;
+            navigator.clipboard.writeText(currentVideoUrl)
+                .then(() => showToast('无水印下载链接已成功复制到剪贴板！'))
+                .catch(err => {
+                    console.error('Copy error:', err);
+                    showToast('复制失败，请手动选择复制');
+                });
+        }
+
+        // History Management
+        function saveToHistory(item) {
+            let history = JSON.parse(localStorage.getItem('parse_history') || '[]');
+            
+            // Remove duplicates (checking by ID)
+            history = history.filter(h => h.id !== item.id);
+            
+            // Push to start of list
+            history.unshift({
+                id: item.id,
+                title: item.title,
+                thumbnail: item.thumbnail,
+                uploader: item.uploader,
+                duration: item.duration,
+                video_url: item.video_url,
+                extractor: item.extractor
+            });
+
+            // Limit history to 15 items
+            if (history.length > 15) {
+                history.pop();
+            }
+
+            localStorage.setItem('parse_history', JSON.stringify(history));
+            renderHistory();
+        }
+
+        function renderHistory() {
+            const historyList = document.getElementById('history-list');
+            const clearBtn = document.getElementById('clear-btn');
+            const history = JSON.parse(localStorage.getItem('parse_history') || '[]');
+
+            if (history.length === 0) {
+                historyList.innerHTML = '<div class="empty-history">暂无解析记录</div>';
+                clearBtn.style.display = 'none';
+                return;
+            }
+
+            clearBtn.style.display = 'flex';
+            historyList.innerHTML = '';
+
+            history.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'history-item';
+                div.onclick = () => loadHistoryItem(item);
+
+                div.innerHTML = `
+                    <img class="history-thumb" src="${item.thumbnail}" alt="thumb">
+                    <div class="history-details">
+                        <div class="history-item-title">${item.title}</div>
+                        <div class="history-item-meta">
+                            <span>@${item.uploader}</span>
+                            <span>|</span>
+                            <span>${formatDuration(item.duration)}</span>
+                            <span>|</span>
+                            <span style="text-transform:uppercase; font-weight:600; color: ${item.extractor.toLowerCase().includes('tiktok') ? '#ff0050' : '#00f2fe'}">${item.extractor}</span>
+                        </div>
+                    </div>
+                `;
+                historyList.appendChild(div);
+            });
+        }
+
+        function loadHistoryItem(item) {
+            // Populate UI results from history
+            document.getElementById('res-cover').src = item.thumbnail;
+            document.getElementById('res-duration').textContent = formatDuration(item.duration);
+            document.getElementById('res-title').textContent = item.title;
+            document.getElementById('res-author').textContent = item.uploader;
+
+            const platformBadge = document.getElementById('res-platform');
+            platformBadge.textContent = item.extractor;
+            platformBadge.className = 'platform-badge';
+            if (item.extractor.toLowerCase().includes('tiktok')) {
+                platformBadge.classList.add('platform-tiktok');
+            } else {
+                platformBadge.classList.add('platform-douyin');
+            }
+
+            currentVideoUrl = item.video_url;
+            document.getElementById('download-btn').href = `${item.video_url}&download=1`;
+            document.getElementById('preview-btn').href = item.video_url;
+
+            const resultPanel = document.getElementById('result-panel');
+            resultPanel.style.display = 'block';
+            setTimeout(() => {
+                resultPanel.classList.add('show');
+            }, 50);
+
+            // Scroll smoothly to results
+            resultPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        function clearHistory() {
+            if (confirm('确定要清空所有的解析记录吗？')) {
+                localStorage.removeItem('parse_history');
+                renderHistory();
+            }
+        }
+    </script>
+</body>
+</html>
