@@ -29,6 +29,7 @@ app = FastAPI(
 TG_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 COOKIES_CONTENT = os.getenv("COOKIES_CONTENT")
+TG_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@renzhiup")
 
 # Dynamically generate cookies.txt from environment variable if provided
 if COOKIES_CONTENT:
@@ -446,30 +447,37 @@ if bot:
                 if actual_size > 50 * 1024 * 1024:
                     raise ValueError("视频下载文件实际大小超过 50MB")
 
+                # Determine target for video: channel if configured, otherwise user
+                target_chat = TG_CHANNEL if TG_CHANNEL else message.chat.id
+
+                upload_msg_text = "📤 正在上传视频到频道..." if TG_CHANNEL else "📤 正在上传视频到 Telegram..."
                 await bot.edit_message_text(
-                    text="📤 正在上传视频到 Telegram...",
+                    text=upload_msg_text,
                     chat_id=message.chat.id,
                     message_id=status_msg.message_id
                 )
 
-                # Send video to user
+                # Send video
                 title = metadata.get('title') or metadata.get('description') or '无水印高清视频'
                 caption = f"🎬 {title[:200]}\n\n👤 作者: {metadata.get('uploader', '未知')}\n⏱️ 时长: {metadata.get('duration', 0)}秒\n\n💡 视频已成功去水印！"
 
                 with open(temp_path, "rb") as video_file:
                     await bot.send_video(
-                        chat_id=message.chat.id,
+                        chat_id=target_chat,
                         video=video_file,
                         caption=caption,
-                        supports_streaming=True,
-                        reply_to_message_id=message.message_id
+                        supports_streaming=True
                     )
 
                 # Delete the loading status message
                 await bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
 
+                # Send final confirmation message to user if synced to channel
+                if TG_CHANNEL:
+                    await bot.reply_to(message, f"🎉 视频解析成功，已同步发送至频道 {TG_CHANNEL}！")
+
             except Exception as dl_upload_err:
-                logger.warning(f"Fallback to text link: {str(dl_upload_err)}")
+                logger.warning(f"Failed to post video directly: {str(dl_upload_err)}")
                 
                 # Build download link using fallback configuration (RENDER_EXTERNAL_URL)
                 base_url = RENDER_EXTERNAL_URL.rstrip('/') + '/' if RENDER_EXTERNAL_URL else "http://localhost:8000/"
@@ -483,16 +491,40 @@ if bot:
                     f"🎬 **{metadata.get('title', '视频解析成功')}**\n\n"
                     f"👤 作者: {metadata.get('uploader', '未知')}\n"
                     f"⏱️ 时长: {metadata.get('duration', 0)}秒\n\n"
-                    f"⚠️ 因视频文件过大 (>50MB) 或 TG 限制，未能直接发送视频文件。\n"
+                    f"⚠️ 因视频文件过大 (>50MB) 或机器人权限受限，未能直接上传视频文件。\n"
                     f"🔗 您可以点击下方链接直接下载高清无水印视频：\n\n"
                     f"[📥 点击下载无水印视频]({proxy_download_url})"
                 )
-                await bot.edit_message_text(
-                    text=fallback_text,
-                    chat_id=message.chat.id,
-                    message_id=status_msg.message_id,
-                    parse_mode="Markdown"
-                )
+
+                if TG_CHANNEL:
+                    try:
+                        # Try to post the link fallback message to the channel
+                        await bot.send_message(
+                            chat_id=TG_CHANNEL,
+                            text=fallback_text,
+                            parse_mode="Markdown"
+                        )
+                        await bot.edit_message_text(
+                            text=f"🎉 视频解析成功！但因文件过大或权限受限未能直接上传视频，已将下载链接同步发布到频道 {TG_CHANNEL}。\n\n[📥 点击直接下载]({proxy_download_url})",
+                            chat_id=message.chat.id,
+                            message_id=status_msg.message_id,
+                            parse_mode="Markdown"
+                        )
+                    except Exception as chan_err:
+                        logger.error(f"Failed to send fallback message to channel: {str(chan_err)}")
+                        await bot.edit_message_text(
+                            text=fallback_text + f"\n\n*(发送至频道失败，请确保机器人已成为频道 {TG_CHANNEL} 的管理员。)*",
+                            chat_id=message.chat.id,
+                            message_id=status_msg.message_id,
+                            parse_mode="Markdown"
+                        )
+                else:
+                    await bot.edit_message_text(
+                        text=fallback_text,
+                        chat_id=message.chat.id,
+                        message_id=status_msg.message_id,
+                        parse_mode="Markdown"
+                    )
             finally:
                 # Remove temp file
                 if os.path.exists(temp_path):
