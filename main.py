@@ -199,6 +199,110 @@ class VideoMetadata(BaseModel):
 # Video Parsing Logic
 # ==========================================
 
+def parse_video_douyin_web(url: str) -> dict:
+    """Primary parser using Douyin's web post API (aweme/v1/web/aweme/post).
+    
+    This endpoint works with only sessionid + ttwid cookies — no msToken needed.
+    It's more stable than yt-dlp's aweme/detail endpoint which requires the JS-computed msToken.
+    """
+    logger.info(f"Using Douyin web post API parser for URL: {url}")
+    
+    # Step 1: Follow redirect to get video_id
+    headers_mobile = {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
+    }
+    req = urllib.request.Request(url, headers=headers_mobile)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        final_url = resp.geturl()
+    
+    video_id_match = re.search(r'/video/(\d+)', final_url)
+    if not video_id_match:
+        raise ValueError(f"Could not extract video ID from redirect URL: {final_url}")
+    video_id = video_id_match.group(1)
+    logger.info(f"Extracted video ID: {video_id}")
+    
+    # Step 2: Load cookies from cookies.txt
+    cookies_path = 'cookies.txt'
+    cookie_dict = {}
+    if os.path.exists(cookies_path):
+        with open(cookies_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                parts = line.split('\t')
+                if len(parts) == 7 and 'douyin.com' in parts[0]:
+                    cookie_dict[parts[5]] = parts[6]
+    
+    if not cookie_dict.get('sessionid'):
+        raise ValueError("No sessionid in cookies.txt — please update cookies via /update-cookies endpoint")
+    
+    cookie_str = '; '.join(f'{k}={v}' for k, v in cookie_dict.items())
+    
+    # Step 3: Call aweme/post API with video_id — works without msToken
+    api_url = (
+        f'https://www.douyin.com/aweme/v1/web/aweme/post/'
+        f'?user_id=&count=1&aweme_id={video_id}&aid=6383&version_name=23.5.0'
+        f'&device_platform=webapp&os_name=windows&browser_language=zh-CN'
+        f'&browser_platform=Win32&browser_name=Chrome&browser_version=124.0.0.0'
+    )
+    headers_api = {
+        'Cookie': cookie_str,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Referer': f'https://www.douyin.com/video/{video_id}',
+        'Accept': 'application/json, text/plain, */*',
+    }
+    
+    req2 = urllib.request.Request(api_url, headers=headers_api)
+    with urllib.request.urlopen(req2, timeout=15) as resp2:
+        data = json.loads(resp2.read().decode('utf-8'))
+    
+    if data.get('status_code') != 0:
+        raise ValueError(f"Douyin web API returned error: {data.get('status_code')} {data.get('status_msg', '')}")
+    
+    aweme_list = data.get('aweme_list', [])
+    if not aweme_list:
+        raise ValueError("Douyin web API returned empty aweme_list")
+    
+    item = aweme_list[0]
+    video_data = item.get('video', {})
+    
+    # Prefer highest quality (last bit_rate entry)
+    bit_rates = video_data.get('bit_rate', [])
+    if bit_rates:
+        best = bit_rates[-1]
+        play_urls = best.get('play_addr', {}).get('url_list', [])
+    else:
+        play_urls = video_data.get('play_addr', {}).get('url_list', [])
+    
+    if not play_urls:
+        raise ValueError("No play URL found in Douyin web API response")
+    
+    video_url = play_urls[0]
+    author = item.get('author', {})
+    
+    # Extract cover image
+    cover_urls = video_data.get('cover', {}).get('url_list', [])
+    thumbnail = cover_urls[0] if cover_urls else ''
+    
+    metadata = {
+        'id': item.get('aweme_id') or video_id,
+        'title': item.get('desc') or 'No Title',
+        'description': item.get('desc') or '',
+        'thumbnail': thumbnail,
+        'uploader': author.get('nickname') or author.get('uid') or 'Unknown',
+        'duration': float(item.get('duration') or 0) / 1000.0,
+        'raw_video_url': video_url,
+        'extractor': 'Douyin'
+    }
+    
+    logger.info(f"✅ Douyin web post API succeeded: {metadata['title'][:50]}")
+    return {
+        'metadata': metadata,
+        'cookie_header': cookie_str
+    }
+
+
 def parse_video_fallback(url: str) -> dict:
     """Fallback parser that queries a public Evil0ctal API instance when local yt-dlp fails."""
     logger.info(f"Using fallback parser for URL: {url}")
@@ -495,22 +599,26 @@ def parse_video(url: str) -> dict:
                 'metadata': metadata,
                 'cookie_header': cookie_header
             }
-    except Exception as e:
-        logger.warning(f"Local yt-dlp parsing failed: {str(e)}. Swapping to fallback 1 (Mobile HTML Scraper)...")
+    except Exception as ytdlp_err:
+        logger.warning(f"yt-dlp parsing failed: {str(ytdlp_err)[:100]}. Trying Douyin web post API...")
         try:
-            return parse_video_mobile_html(url)
-        except Exception as mobile_err:
-            logger.warning(f"Fallback 1 (Mobile HTML Scraper) failed: {str(mobile_err)}. Swapping to fallback 2 (douyin.wtf)...")
+            return parse_video_douyin_web(url)
+        except Exception as web_err:
+            logger.warning(f"Douyin web post API failed: {str(web_err)[:100]}. Trying Mobile HTML Scraper...")
             try:
-                return parse_video_fallback(url)
-            except Exception as fallback_err_1:
-                logger.warning(f"Fallback 2 (douyin.wtf) failed: {str(fallback_err_1)}. Swapping to fallback 3 (pearktrue)...")
+                return parse_video_mobile_html(url)
+            except Exception as mobile_err:
+                logger.warning(f"Mobile HTML Scraper failed: {str(mobile_err)[:80]}. Trying douyin.wtf...")
                 try:
-                    return parse_video_pearktrue(url)
-                except Exception as fallback_err_2:
-                    logger.error(f"All fallback parsers failed. Mobile: {str(mobile_err)}. WTF: {str(fallback_err_1)}. PearkTrue: {str(fallback_err_2)}")
-                    # Raise original error to represent the primary failure reason
-                    raise e
+                    return parse_video_fallback(url)
+                except Exception as fallback_err_1:
+                    logger.warning(f"douyin.wtf failed: {str(fallback_err_1)[:80]}. Trying pearktrue...")
+                    try:
+                        return parse_video_pearktrue(url)
+                    except Exception as fallback_err_2:
+                        logger.error(f"All parsers failed. ytdlp={str(ytdlp_err)[:60]} web={str(web_err)[:60]}")
+                        raise ytdlp_err
+
 
 
 # ==========================================

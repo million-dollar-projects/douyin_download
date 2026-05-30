@@ -12,56 +12,58 @@ echo "======================================"
 echo "  抖音 Cookie 自动更新工具"
 echo "======================================"
 echo ""
-echo "📦 第一步：从浏览器提取最新 Cookie..."
+echo "📦 第一步：从 Chrome 浏览器提取最新 Cookie..."
 
-# 注意: 不使用 set -e，而是手动检查 cookies.txt 文件内容
-# yt-dlp 提取 Cookie 成功后即使退出码非零，Cookie 文件也已写入
-
-# 先删除旧文件
 rm -f "$COOKIES_FILE"
 
-# 尝试从 Chrome 提取
-.venv/bin/yt-dlp \
-    --cookies-from-browser chrome \
-    --cookies "$COOKIES_FILE" \
-    --skip-download \
-    --quiet \
-    "https://www.douyin.com/" 2>&1 | grep -v "ERROR\|WARNING" || true
+# macOS 上 Chrome 的 Default profile 路径
+CHROME_DEFAULT="$HOME/Library/Application Support/Google/Chrome/Default"
+CHROME_PROFILES=(
+    "$CHROME_DEFAULT"
+    "$HOME/Library/Application Support/Google/Chrome/Profile 3"
+    "$HOME/Library/Application Support/Google/Chrome/Default"
+    "$HOME/Library/Application Support/Google/Chrome/Profile 1"
+    "$HOME/Library/Application Support/Google/Chrome/Profile 4"
+)
 
-# 检查是否写入成功（只要文件存在且有内容就算成功）
-if [ -f "$COOKIES_FILE" ] && [ -s "$COOKIES_FILE" ]; then
-    LINE_COUNT=$(grep -c "douyin.com" "$COOKIES_FILE" 2>/dev/null || echo 0)
-    echo "✅ Chrome Cookie 提取成功！(找到 $LINE_COUNT 条 douyin.com cookie)"
-else
-    echo "   Chrome 未找到，尝试 Safari..."
-    rm -f "$COOKIES_FILE"
+EXTRACTED=false
+for PROFILE_PATH in "${CHROME_PROFILES[@]}"; do
+    if [ ! -d "$PROFILE_PATH" ]; then
+        continue
+    fi
+    
+    PROFILE_NAME=$(basename "$PROFILE_PATH")
+    echo "   尝试 Chrome profile: $PROFILE_NAME ..."
+    
     .venv/bin/yt-dlp \
-        --cookies-from-browser safari \
+        --cookies-from-browser "chrome:$PROFILE_PATH" \
         --cookies "$COOKIES_FILE" \
         --skip-download \
         --quiet \
         "https://www.douyin.com/" 2>&1 | grep -v "ERROR\|WARNING" || true
-
-    if [ -f "$COOKIES_FILE" ] && [ -s "$COOKIES_FILE" ]; then
-        LINE_COUNT=$(grep -c "douyin.com" "$COOKIES_FILE" 2>/dev/null || echo 0)
-        echo "✅ Safari Cookie 提取成功！(找到 $LINE_COUNT 条 douyin.com cookie)"
+    
+    # 检查是否有 douyin sessionid
+    if [ -f "$COOKIES_FILE" ] && grep -q "sessionid" "$COOKIES_FILE" && grep -q "douyin.com" "$COOKIES_FILE"; then
+        DOUYIN_COUNT=$(grep -c "douyin.com" "$COOKIES_FILE" 2>/dev/null || echo 0)
+        echo "✅ 成功！从 $PROFILE_NAME 提取到 $DOUYIN_COUNT 条 douyin.com Cookie (含 sessionid)"
+        EXTRACTED=true
+        break
     else
-        echo "❌ 无法从浏览器提取 Cookie"
-        echo ""
-        echo "   请检查："
-        echo "   1. Chrome 或 Safari 是否已打开"
-        echo "   2. 浏览器中是否已登录 douyin.com"
-        echo "   3. 尝试在浏览器中手动打开 https://www.douyin.com/ 并确认已登录"
-        exit 1
+        echo "   $PROFILE_NAME 中未找到 douyin sessionid，继续尝试..."
+        rm -f "$COOKIES_FILE"
     fi
-fi
+done
 
-# 验证 sessionid 是否存在（说明是已登录状态）
-if ! grep -q "sessionid" "$COOKIES_FILE" 2>/dev/null; then
-    echo "⚠️  警告：Cookie 中没有 sessionid，你可能没有登录抖音"
-    echo "   请先在浏览器中登录 douyin.com，再运行此脚本"
+if [ "$EXTRACTED" = false ]; then
+    echo "❌ 所有 Chrome profile 均未找到 douyin.com 的登录 Cookie"
+    echo ""
+    echo "   请确认："
+    echo "   1. 已在 Chrome 中打开 https://www.douyin.com/"
+    echo "   2. 已完成登录（页面显示你的账号头像）"
+    echo "   3. 关闭 Chrome 后重新打开再试（有时需要）"
     exit 1
 fi
+
 
 echo ""
 echo "📤 第二步：推送 Cookie 到 Render 服务器..."
