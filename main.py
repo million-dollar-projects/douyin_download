@@ -28,6 +28,18 @@ app = FastAPI(
 # Telegram Bot Configuration
 TG_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+COOKIES_CONTENT = os.getenv("COOKIES_CONTENT")
+
+# Dynamically generate cookies.txt from environment variable if provided
+if COOKIES_CONTENT:
+    try:
+        # Clean up line breaks from environment variable strings if any, and write
+        cleaned_cookies = COOKIES_CONTENT.replace("\\n", "\n").strip()
+        with open("cookies.txt", "w", encoding="utf-8") as f:
+            f.write(cleaned_cookies + "\n")
+        logger.info("Successfully loaded and created cookies.txt from environment variable.")
+    except Exception as e:
+        logger.error(f"Failed to create cookies.txt from environment variable: {str(e)}")
 
 bot = None
 if TG_BOT_TOKEN:
@@ -294,8 +306,34 @@ async def stream_video(
 # Telegram Bot Integrations
 # ==========================================
 
+async def self_keep_alive():
+    """Background task to ping itself and keep Render instance alive."""
+    if not RENDER_EXTERNAL_URL:
+        return
+    
+    url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/health"
+    logger.info(f"Self keep-alive task started. Target: {url}")
+    
+    # Wait for service startup to stabilize
+    await asyncio.sleep(60)
+    
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(url)
+                logger.info(f"Self-ping keep-alive status: {r.status_code}")
+        except Exception as e:
+            logger.warning(f"Self-ping keep-alive failed: {str(e)}")
+        
+        # Render sleeps after 15 mins of inactivity. Ping every 10 mins (600s).
+        await asyncio.sleep(600)
+
 @app.on_event("startup")
 async def on_startup():
+    # Start the self-ping keep alive task
+    if RENDER_EXTERNAL_URL:
+        asyncio.create_task(self_keep_alive())
+
     if bot and RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/tg-webhook/{TG_BOT_TOKEN}"
         logger.info(f"Setting Telegram Webhook to: {webhook_url}")
