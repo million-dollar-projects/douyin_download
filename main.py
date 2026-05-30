@@ -653,11 +653,102 @@ async def self_keep_alive():
         # Render sleeps after 15 mins of inactivity. Ping every 10 mins (600s).
         await asyncio.sleep(600)
 
+
+async def auto_refresh_douyin_tokens():
+    """Background task that automatically refreshes short-lived Douyin tokens (msToken, ttwid)
+    every 15 minutes. This eliminates the need to manually update cookies.
+    The long-lived sessionid (30 days) remains unchanged; only the ephemeral tokens are refreshed.
+    """
+    cookies_path = 'cookies.txt'
+    logger.info("Auto-refresh token task started. Will refresh msToken every 15 minutes.")
+
+    # Wait a bit for initial startup before first refresh
+    await asyncio.sleep(30)
+
+    while True:
+        try:
+            if not os.path.exists(cookies_path) or os.path.getsize(cookies_path) == 0:
+                logger.warning("Auto-refresh: cookies.txt not found or empty, skipping.")
+                await asyncio.sleep(900)
+                continue
+
+            # --- Step 1: Read all existing cookies into a dict ---
+            cookie_lines_map = {}  # name -> list of 7 tab-separated fields
+            with open(cookies_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split('\t')
+                    if len(parts) == 7:
+                        name = parts[5]
+                        cookie_lines_map[name] = parts
+
+            if not cookie_lines_map:
+                logger.warning("Auto-refresh: No valid cookies found, skipping.")
+                await asyncio.sleep(900)
+                continue
+
+            # Build cookie header from existing cookies for the request
+            cookie_header_str = '; '.join(f"{n}={p[6]}" for n, p in cookie_lines_map.items())
+
+            # --- Step 2: Visit Douyin homepage to get a fresh msToken ---
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=20.0,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Cookie': cookie_header_str,
+                }
+            ) as client:
+                r = await client.get('https://www.douyin.com/')
+
+                refreshed = []
+                # Tokens to refresh from Set-Cookie response
+                tokens_to_refresh = ['msToken', 'ttwid', '__ac_nonce', '__ac_signature', '__ac_referer']
+
+                for name, value in r.cookies.items():
+                    if name in tokens_to_refresh and value:
+                        if name in cookie_lines_map:
+                            # Update existing entry
+                            cookie_lines_map[name][6] = value
+                        else:
+                            # Add new entry with standard Douyin cookie attributes
+                            cookie_lines_map[name] = [
+                                '.douyin.com', 'TRUE', '/', 'FALSE', '2147483647', name, value
+                            ]
+                        refreshed.append(name)
+
+            # --- Step 3: Write updated cookies back to file ---
+            if refreshed:
+                lines = ['# Netscape HTTP Cookie File\n']
+                for name, parts in cookie_lines_map.items():
+                    lines.append('\t'.join(parts) + '\n')
+
+                with open(cookies_path, 'w', encoding='utf-8') as f:
+                    f.writelines(lines)
+
+                logger.info(f"✅ Auto-refresh success: updated tokens {refreshed}")
+            else:
+                logger.warning("Auto-refresh: No new tokens received from Douyin. Cookies may be fully expired.")
+
+        except Exception as e:
+            logger.warning(f"Auto-refresh token task error: {str(e)}")
+
+        # Refresh every 15 minutes (well within the ~30min expiry window)
+        await asyncio.sleep(900)
+
 @app.on_event("startup")
 async def on_startup():
     # Start the self-ping keep alive task
     if RENDER_EXTERNAL_URL:
         asyncio.create_task(self_keep_alive())
+
+    # Always start the auto-refresh token task (works both locally and on Render)
+    asyncio.create_task(auto_refresh_douyin_tokens())
+    logger.info("Auto-refresh token task scheduled.")
 
     if bot and RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/tg-webhook/{TG_BOT_TOKEN}"
@@ -673,6 +764,94 @@ async def on_startup():
             logger.error(f"Error during setting Telegram Webhook: {str(e)}")
     elif bot:
         logger.warning("RENDER_EXTERNAL_URL is not set. Webhook registration skipped. In local environment, use polling or configure local tunnels.")
+
+
+@app.get("/cookie-status")
+async def cookie_status():
+    """Check the current validity and age of cookies in cookies.txt."""
+    cookies_path = 'cookies.txt'
+    if not os.path.exists(cookies_path):
+        return {"status": "missing", "message": "cookies.txt not found"}
+
+    size = os.path.getsize(cookies_path)
+    if size == 0:
+        return {"status": "empty", "message": "cookies.txt is empty"}
+
+    import time
+    mtime = os.path.getmtime(cookies_path)
+    age_minutes = (time.time() - mtime) / 60
+
+    cookie_names = []
+    with open(cookies_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                parts = line.split('\t')
+                if len(parts) >= 7:
+                    cookie_names.append(parts[5])
+
+    has_session = any(n in cookie_names for n in ['sessionid', 'sessionid_ss', 'sid_tt'])
+    has_mstoken = 'msToken' in cookie_names
+
+    return {
+        "status": "ok" if has_session else "no_session",
+        "size_bytes": size,
+        "last_updated_minutes_ago": round(age_minutes, 1),
+        "cookie_count": len(cookie_names),
+        "has_session_id": has_session,
+        "has_mstoken": has_mstoken,
+        "cookie_names": cookie_names,
+        "message": (
+            "✅ Cookies look healthy" if (has_session and has_mstoken)
+            else "⚠️ Missing sessionid - you need to re-login"
+            if not has_session
+            else "⚠️ Missing msToken - auto-refresh should fix this shortly"
+        )
+    }
+
+COOKIES_UPDATE_TOKEN = os.getenv("COOKIES_UPDATE_TOKEN", "")
+
+@app.post("/update-cookies")
+async def update_cookies_endpoint(request: Request):
+    """Securely receive and update cookies.txt from a remote push (e.g., local shell script).
+    Requires the COOKIES_UPDATE_TOKEN header to match the env var COOKIES_UPDATE_TOKEN.
+    """
+    # Require auth token if configured
+    if COOKIES_UPDATE_TOKEN:
+        req_token = request.headers.get("X-Update-Token", "")
+        if req_token != COOKIES_UPDATE_TOKEN:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid update token")
+
+    try:
+        body = await request.json()
+        raw_cookies = body.get("cookies", "")
+        if not raw_cookies:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No cookies provided")
+
+        # Clean and validate
+        cleaned = raw_cookies.replace("\\n", "\n").replace("\\t", "\t").strip()
+        if "Netscape HTTP Cookie File" not in cleaned:
+            cleaned = "# Netscape HTTP Cookie File\n" + cleaned
+
+        cookies_path = "cookies.txt"
+        with open(cookies_path, "w", encoding="utf-8") as f:
+            f.write(cleaned + "\n")
+
+        sanitize_and_bridge_cookies(cookies_path)
+        size = os.path.getsize(cookies_path)
+        logger.info(f"✅ cookies.txt updated remotely via /update-cookies endpoint ({size} bytes)")
+
+        return {
+            "status": "ok",
+            "message": f"Cookies updated successfully ({size} bytes)",
+            "cookie_count": sum(1 for line in cleaned.split("\n") if line.strip() and not line.strip().startswith("#"))
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update cookies via endpoint: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
 
 @app.post("/tg-webhook/{token}")
 async def tg_webhook(token: str, request: Request):
