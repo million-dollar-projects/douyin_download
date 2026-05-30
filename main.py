@@ -4,14 +4,19 @@ import json
 import logging
 import urllib.parse
 import urllib.request
+import tempfile
+import asyncio
 from fastapi import FastAPI, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
 import httpx
 import yt_dlp
+from telebot.async_telebot import AsyncTeleBot
+from telebot import types
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING) # Mute verbose httpx logs
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -19,6 +24,17 @@ app = FastAPI(
     description="API to extract no-watermark video URLs from TikTok and Douyin using FastAPI + yt-dlp",
     version="1.0.0"
 )
+
+# Telegram Bot Configuration
+TG_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+
+bot = None
+if TG_BOT_TOKEN:
+    bot = AsyncTeleBot(TG_BOT_TOKEN)
+    logger.info("Telegram Bot Async instance initialized.")
+else:
+    logger.warning("TELEGRAM_BOT_TOKEN is not set. Telegram Bot functions will be inactive.")
 
 class ParseRequest(BaseModel):
     url: str = Field(..., description="The TikTok or Douyin video URL, or share text containing the URL")
@@ -272,3 +288,186 @@ async def stream_video(
         media_type=content_type,
         headers=response_headers
     )
+
+
+# ==========================================
+# Telegram Bot Integrations
+# ==========================================
+
+@app.on_event("startup")
+async def on_startup():
+    if bot and RENDER_EXTERNAL_URL:
+        webhook_url = f"{RENDER_EXTERNAL_URL.rstrip('/')}/tg-webhook/{TG_BOT_TOKEN}"
+        logger.info(f"Setting Telegram Webhook to: {webhook_url}")
+        try:
+            await bot.remove_webhook()
+            success = await bot.set_webhook(url=webhook_url)
+            if success:
+                logger.info("Telegram Webhook set successfully.")
+            else:
+                logger.error("Failed to set Telegram Webhook.")
+        except Exception as e:
+            logger.error(f"Error during setting Telegram Webhook: {str(e)}")
+    elif bot:
+        logger.warning("RENDER_EXTERNAL_URL is not set. Webhook registration skipped. In local environment, use polling or configure local tunnels.")
+
+@app.post("/tg-webhook/{token}")
+async def tg_webhook(token: str, request: Request):
+    if not bot or token != TG_BOT_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized or Bot not active"
+        )
+    try:
+        body = await request.body()
+        json_string = body.decode("utf-8")
+        update = types.Update.de_json(json_string)
+        await bot.process_new_updates([update])
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Error processing Telegram update: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+# Define Bot handlers only if bot is initialized
+if bot:
+    @bot.message_handler(commands=['start', 'help'])
+    async def send_welcome(message):
+        welcome_text = (
+            "👋 **欢迎使用抖音 & TikTok 无水印视频下载机器人！**\n\n"
+            "直接向我发送抖音或 TikTok 的分享链接（支持整段分享文本），我就会为您解析并直接把去水印的高清视频发送给您。\n\n"
+            "💡 示例链接：\n"
+            "• `https://v.douyin.com/xxxx/`\n"
+            "• `https://www.tiktok.com/@user/video/xxxx`"
+        )
+        await bot.reply_to(message, welcome_text, parse_mode="Markdown")
+
+    @bot.message_handler(func=lambda message: True)
+    async def handle_message(message):
+        text = message.text
+        if not text:
+            return
+
+        try:
+            target_url = extract_http_url(text)
+        except ValueError:
+            await bot.reply_to(message, "⚠️ 未在您的消息中检测到有效的链接，请发送正确的抖音或 TikTok 分享文本。")
+            return
+
+        # Simple verification of domains
+        if not any(domain in target_url for domain in ["douyin.com", "tiktok.com", "amemv.com"]):
+            await bot.reply_to(message, "⚠️ 该链接不属于支持的平台（抖音/TikTok），请检查后重新发送。")
+            return
+
+        status_msg = await bot.reply_to(message, "⏳ 正在解析链接，请稍候...")
+
+        try:
+            # Parse video using existing logic
+            result = parse_video(target_url)
+            metadata = result['metadata']
+            cookie_header = result['cookie_header']
+            raw_cdn_url = metadata['raw_video_url']
+
+            await bot.edit_message_text(
+                text="📥 视频解析成功，正在下载并准备无水印高清视频文件...",
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id
+            )
+
+            # Start downloading video stream
+            req_referer = target_url
+            headers = {
+                "Referer": req_referer,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+            }
+            if cookie_header:
+                headers["Cookie"] = cookie_header
+
+            # Use temp file to download video safely
+            with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as temp_video:
+                temp_path = temp_video.name
+
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=45.0) as client:
+                    async with client.stream("GET", raw_cdn_url, headers=headers) as r:
+                        if r.status_code >= 400:
+                            raise ValueError(f"Download failed from CDN, HTTP {r.status_code}")
+                        
+                        content_length = r.headers.get("content-length")
+                        file_size = int(content_length) if content_length else 0
+
+                        # Telegram Bot file size limit is 50MB
+                        if file_size > 50 * 1024 * 1024:
+                            raise ValueError("视频大小超过 50MB 限制")
+
+                        with open(temp_path, "wb") as f:
+                            async for chunk in r.aiter_bytes(chunk_size=65536):
+                                f.write(chunk)
+
+                # Double check size on disk
+                actual_size = os.path.getsize(temp_path)
+                if actual_size > 50 * 1024 * 1024:
+                    raise ValueError("视频下载文件实际大小超过 50MB")
+
+                await bot.edit_message_text(
+                    text="📤 正在上传视频到 Telegram...",
+                    chat_id=message.chat.id,
+                    message_id=status_msg.message_id
+                )
+
+                # Send video to user
+                title = metadata.get('title') or metadata.get('description') or '无水印高清视频'
+                caption = f"🎬 {title[:200]}\n\n👤 作者: {metadata.get('uploader', '未知')}\n⏱️ 时长: {metadata.get('duration', 0)}秒\n\n💡 视频已成功去水印！"
+
+                with open(temp_path, "rb") as video_file:
+                    await bot.send_video(
+                        chat_id=message.chat.id,
+                        video=video_file,
+                        caption=caption,
+                        supports_streaming=True,
+                        reply_to_message_id=message.message_id
+                    )
+
+                # Delete the loading status message
+                await bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
+
+            except Exception as dl_upload_err:
+                logger.warning(f"Fallback to text link: {str(dl_upload_err)}")
+                
+                # Build download link using fallback configuration (RENDER_EXTERNAL_URL)
+                base_url = RENDER_EXTERNAL_URL.rstrip('/') + '/' if RENDER_EXTERNAL_URL else "http://localhost:8000/"
+                encoded_cdn = urllib.parse.quote(raw_cdn_url)
+                encoded_cookies = urllib.parse.quote(cookie_header)
+                encoded_orig = urllib.parse.quote(target_url)
+                
+                proxy_download_url = f"{base_url}stream?url={encoded_cdn}&cookies={encoded_cookies}&referer={encoded_orig}&download=1"
+
+                fallback_text = (
+                    f"🎬 **{metadata.get('title', '视频解析成功')}**\n\n"
+                    f"👤 作者: {metadata.get('uploader', '未知')}\n"
+                    f"⏱️ 时长: {metadata.get('duration', 0)}秒\n\n"
+                    f"⚠️ 因视频文件过大 (>50MB) 或 TG 限制，未能直接发送视频文件。\n"
+                    f"🔗 您可以点击下方链接直接下载高清无水印视频：\n\n"
+                    f"[📥 点击下载无水印视频]({proxy_download_url})"
+                )
+                await bot.edit_message_text(
+                    text=fallback_text,
+                    chat_id=message.chat.id,
+                    message_id=status_msg.message_id,
+                    parse_mode="Markdown"
+                )
+            finally:
+                # Remove temp file
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception as cleanup_err:
+                        logger.error(f"Failed to remove temp file: {str(cleanup_err)}")
+                        
+        except Exception as parse_error:
+            logger.error(f"Bot handler parse error: {str(parse_error)}")
+            error_msg = clean_error_message(str(parse_error))
+            await bot.edit_message_text(
+                text=f"❌ 解析失败\n\n原因: {error_msg}",
+                chat_id=message.chat.id,
+                message_id=status_msg.message_id
+            )
