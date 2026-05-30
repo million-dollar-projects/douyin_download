@@ -34,11 +34,39 @@ TG_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@renzhiup")
 # Dynamically generate cookies.txt from environment variable if provided
 if COOKIES_CONTENT:
     try:
-        # Clean up line breaks from environment variable strings if any, and write
-        cleaned_cookies = COOKIES_CONTENT.replace("\\n", "\n").strip()
+        # Replace string representations of tabs/newlines and split
+        raw_content = COOKIES_CONTENT.replace("\\n", "\n").replace("\\t", "\t")
+        lines = raw_content.strip().split('\n')
+        
+        cleaned_lines = []
+        has_header = False
+        
+        for line in lines:
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            if "Netscape HTTP Cookie File" in line_stripped:
+                has_header = True
+                continue
+            if line_stripped.startswith("#"):
+                cleaned_lines.append(line_stripped)
+                continue
+            
+            # Split fields by tab; if it seems to be split by space (common in env vars), re-split
+            parts = line_stripped.split('\t')
+            if len(parts) < 3:
+                parts = re.split(r'\s+', line_stripped)
+            
+            # Reconstruction with standard tab separator
+            if len(parts) >= 3:
+                cleaned_lines.append("\t".join(parts))
+        
+        # Enforce standard Netscape header as the very first line
+        final_cookies_text = "# Netscape HTTP Cookie File\n" + "\n".join(cleaned_lines) + "\n"
+        
         with open("cookies.txt", "w", encoding="utf-8") as f:
-            f.write(cleaned_cookies + "\n")
-        logger.info("Successfully loaded and created cookies.txt from environment variable.")
+            f.write(final_cookies_text)
+        logger.info("Successfully loaded, repaired, and created cookies.txt from environment variable.")
     except Exception as e:
         logger.error(f"Failed to create cookies.txt from environment variable: {str(e)}")
 
