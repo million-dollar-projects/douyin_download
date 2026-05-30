@@ -200,11 +200,7 @@ class VideoMetadata(BaseModel):
 # ==========================================
 
 def parse_video_douyin_web(url: str) -> dict:
-    """Primary parser using Douyin's web post API (aweme/v1/web/aweme/post).
-    
-    This endpoint works with only sessionid + ttwid cookies — no msToken needed.
-    It's more stable than yt-dlp's aweme/detail endpoint which requires the JS-computed msToken.
-    """
+    """Primary parser using Douyin's web post API (aweme/v1/web/aweme/post) to find the user's own videos."""
     logger.info(f"Using Douyin web post API parser for URL: {url}")
     
     # Step 1: Follow redirect to get video_id
@@ -239,10 +235,10 @@ def parse_video_douyin_web(url: str) -> dict:
     
     cookie_str = '; '.join(f'{k}={v}' for k, v in cookie_dict.items())
     
-    # Step 3: Call aweme/post API with video_id — works without msToken
+    # Step 3: Call aweme/post API to get the user's posts
     api_url = (
         f'https://www.douyin.com/aweme/v1/web/aweme/post/'
-        f'?user_id=&count=1&aweme_id={video_id}&aid=6383&version_name=23.5.0'
+        f'?user_id=&count=35&aid=6383&version_name=23.5.0'
         f'&device_platform=webapp&os_name=windows&browser_language=zh-CN'
         f'&browser_platform=Win32&browser_name=Chrome&browser_version=124.0.0.0'
     )
@@ -264,8 +260,17 @@ def parse_video_douyin_web(url: str) -> dict:
     if not aweme_list:
         raise ValueError("Douyin web API returned empty aweme_list")
     
-    item = aweme_list[0]
-    video_data = item.get('video', {})
+    # Search for the matching video_id in the post list
+    target_item = None
+    for item in aweme_list:
+        if item.get('aweme_id') == video_id:
+            target_item = item
+            break
+            
+    if not target_item:
+        raise ValueError(f"Video {video_id} not found in the user's latest 35 posts via API.")
+    
+    video_data = target_item.get('video', {})
     
     # Prefer highest quality (last bit_rate entry)
     bit_rates = video_data.get('bit_rate', [])
@@ -279,24 +284,24 @@ def parse_video_douyin_web(url: str) -> dict:
         raise ValueError("No play URL found in Douyin web API response")
     
     video_url = play_urls[0]
-    author = item.get('author', {})
+    author = target_item.get('author', {})
     
     # Extract cover image
     cover_urls = video_data.get('cover', {}).get('url_list', [])
     thumbnail = cover_urls[0] if cover_urls else ''
     
     metadata = {
-        'id': item.get('aweme_id') or video_id,
-        'title': item.get('desc') or 'No Title',
-        'description': item.get('desc') or '',
+        'id': target_item.get('aweme_id') or video_id,
+        'title': target_item.get('desc') or 'No Title',
+        'description': target_item.get('desc') or '',
         'thumbnail': thumbnail,
         'uploader': author.get('nickname') or author.get('uid') or 'Unknown',
-        'duration': float(item.get('duration') or 0) / 1000.0,
+        'duration': float(video_data.get('duration') or 0) / 1000.0,
         'raw_video_url': video_url,
         'extractor': 'Douyin'
     }
     
-    logger.info(f"✅ Douyin web post API succeeded: {metadata['title'][:50]}")
+    logger.info(f"✅ Douyin web post API succeeded for {video_id}: {metadata['title'][:50]}")
     return {
         'metadata': metadata,
         'cookie_header': cookie_str
@@ -390,7 +395,10 @@ def parse_video_pearktrue(url: str) -> dict:
 
 
 def parse_video_mobile_html(url: str) -> dict:
-    """Fallback parser that extracts no-watermark video directly from Douyin mobile sharing HTML without cookies."""
+    """Fallback parser that extracts no-watermark video directly from Douyin mobile sharing HTML without cookies.
+    
+    This parser leverages window._ROUTER_DATA script tag inside Douyin mobile/reflow sharing pages.
+    """
     logger.info(f"Using Mobile HTML scraper fallback for URL: {url}")
 
     headers = {
@@ -417,7 +425,56 @@ def parse_video_mobile_html(url: str) -> dict:
         if not video_id:
             raise ValueError("Could not extract video ID from redirects")
 
-        # Step 3: Parse RENDER_DATA from HTML if present
+        # Step 3: Parse _ROUTER_DATA from HTML if present (Modern.js router data format)
+        router_match = re.search(r'window\._ROUTER_DATA\s*=\s*(.+?)</script>', html)
+        if router_match:
+            try:
+                data_str = router_match.group(1).strip()
+                if data_str.endswith(';'):
+                    data_str = data_str[:-1]
+                data = json.loads(data_str)
+                loader_data = data.get('loaderData', {})
+                item_list = []
+                for key, val in loader_data.items():
+                    if val and 'videoInfoRes' in val:
+                        item_list = val['videoInfoRes'].get('item_list', [])
+                        if item_list:
+                            break
+                if item_list:
+                    item = item_list[0]
+                    video_data = item.get('video', {})
+                    play_urls = video_data.get('play_addr', {}).get('url_list', [])
+                    if play_urls:
+                        video_url = play_urls[0]
+                        no_watermark_url = video_url.replace("playwm", "play")
+                        if no_watermark_url.startswith("//"):
+                            no_watermark_url = "https:" + no_watermark_url
+                        
+                        title = item.get('desc') or 'No Title'
+                        nickname = item.get('author', {}).get('nickname') or 'Unknown'
+                        cover_urls = video_data.get('cover', {}).get('url_list', [])
+                        cover_url = cover_urls[0] if cover_urls else ''
+                        duration = float(video_data.get('duration') or 0) / 1000.0
+
+                        metadata = {
+                            'id': item.get('aweme_id') or video_id,
+                            'title': title,
+                            'description': title,
+                            'thumbnail': cover_url,
+                            'uploader': nickname,
+                            'duration': duration,
+                            'raw_video_url': no_watermark_url,
+                            'extractor': 'Douyin'
+                        }
+                        logger.info(f"✅ Extracted metadata from _ROUTER_DATA for video {video_id}")
+                        return {
+                            'metadata': metadata,
+                            'cookie_header': ''
+                        }
+            except Exception as router_err:
+                logger.warning(f"Failed parsing _ROUTER_DATA: {str(router_err)}")
+
+        # Step 4: Parse RENDER_DATA from HTML if present
         render_data_match = re.search(r'<script id="RENDER_DATA" type="application/json">([^<]+)</script>', html)
         if render_data_match:
             render_data_json = urllib.parse.unquote(render_data_match.group(1))
@@ -453,7 +510,7 @@ def parse_video_mobile_html(url: str) -> dict:
                         for k, v in obj.items():
                             res = find_key(v, target_key)
                             if res is not None:
-                                return res
+                                  return res
                     elif isinstance(obj, list):
                         for item in obj:
                             res = find_key(item, target_key)
@@ -481,51 +538,45 @@ def parse_video_mobile_html(url: str) -> dict:
                     'cookie_header': ''
                 }
 
-        # Scraper regex fallback
+        # Step 5: Scraper regex fallback
         play_addr_match = re.search(r'"playAddr"\s*:\s*"([^"]+)"', html)
         if not play_addr_match:
             play_addr_match = re.search(r'playwm[^"]+', html)
             if play_addr_match:
                 matched_str = play_addr_match.group(0)
+                # Unescape slashes first to prevent regex cutting it short
+                matched_str = matched_str.replace('\\u002F', '/').replace('\\/', '/')
                 if matched_str.startswith("//"):
                     matched_str = "https:" + matched_str
-                play_addr_match = re.match(r'[^\\\s]+', matched_str)
+                # Use it directly as no-watermark replacement
+                no_watermark_url = matched_str.replace("playwm", "play")
+                
+                title = "无水印视频"
+                title_match = re.search(r'<title>([^<]+)</title>', html)
+                if title_match:
+                    title = title_match.group(1).replace(" - 抖音", "").replace(" - 抖音手机网页版", "").strip()
 
-        if play_addr_match:
-            video_url = play_addr_match.group(1) if len(play_addr_match.groups()) > 0 else play_addr_match.group(0)
-            video_url = video_url.replace('\\u002F', '/').replace('\\/', '/')
-            if video_url.startswith("//"):
-                video_url = "https:" + video_url
+                nickname = "未知作者"
+                nickname_match = re.search(r'"nickname"\s*:\s*"([^"]+)"', html)
+                if not nickname_match:
+                    nickname_match = re.search(r'<p class="[^\"]*nickname[^\"]*">([^<]+)</p>', html)
+                if nickname_match:
+                    nickname = nickname_match.group(1).strip()
 
-            no_watermark_url = video_url.replace("playwm", "play")
-
-            # Try to extract title and nickname from HTML via regex
-            title = "无水印视频"
-            title_match = re.search(r'<title>([^<]+)</title>', html)
-            if title_match:
-                title = title_match.group(1).replace(" - 抖音", "").replace(" - 抖音手机网页版", "").strip()
-
-            nickname = "未知作者"
-            nickname_match = re.search(r'"nickname"\s*:\s*"([^"]+)"', html)
-            if not nickname_match:
-                nickname_match = re.search(r'<p class="[^\"]*nickname[^\"]*">([^<]+)</p>', html)
-            if nickname_match:
-                nickname = nickname_match.group(1).strip()
-
-            metadata = {
-                'id': video_id,
-                'title': title,
-                'description': title,
-                'thumbnail': '',
-                'uploader': nickname,
-                'duration': 0.0,
-                'raw_video_url': no_watermark_url,
-                'extractor': 'Douyin'
-            }
-            return {
-                'metadata': metadata,
-                'cookie_header': ''
-            }
+                metadata = {
+                    'id': video_id,
+                    'title': title,
+                    'description': title,
+                    'thumbnail': '',
+                    'uploader': nickname,
+                    'duration': 0.0,
+                    'raw_video_url': no_watermark_url,
+                    'extractor': 'Douyin'
+                }
+                return {
+                    'metadata': metadata,
+                    'cookie_header': ''
+                }
 
         raise ValueError("Could not find any video play address in mobile HTML")
     except Exception as e:
@@ -534,7 +585,14 @@ def parse_video_mobile_html(url: str) -> dict:
 
 
 def parse_video(url: str) -> dict:
-    """Uses yt-dlp to extract video metadata and direct URL along with session cookies."""
+    """Uses various fallback parsers to extract video metadata and download URL.
+    
+    1. Mobile HTML Scraper (uses _ROUTER_DATA, fast, no cookies/signatures needed for public videos).
+    2. Local yt-dlp (uses cookies.txt if available, supports private/logged-in user content).
+    3. Douyin web post API (uses cookies, checks user's own latest posts to match the requested video).
+    4. Fallbacks (douyin.wtf, pearktrue.cn).
+    """
+    # Define yt-dlp options (used as second option)
     ydl_opts = {
         'format': 'best',
         'quiet': True,
@@ -558,66 +616,75 @@ def parse_video(url: str) -> dict:
         ydl_opts['cookiefile'] = cookies_path
         logger.info(f"Using sanitized and bridged cookies from {cookies_path}")
 
+    # Step 1: Try Mobile HTML Scraper (fastest, no cookies/signatures needed for public videos)
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-            if 'entries' in info:
-                entries = list(info['entries'])
-                if not entries:
-                    raise ValueError("No video entries found in the URL")
-                info = entries[0]
-
-            video_url = info.get('url')
-
-            if not video_url and info.get('formats'):
-                formats = info.get('formats', [])
-                valid_formats = [f for f in formats if f.get('url')]
-                if valid_formats:
-                    video_url = valid_formats[-1]['url']
-
-            if not video_url:
-                raise ValueError("Could not extract a direct video download URL")
-
-            cookies = []
-            for c in ydl.cookiejar:
-                cookies.append(f"{c.name}={c.value}")
-            cookie_header = "; ".join(cookies)
-
-            metadata = {
-                'id': info.get('id') or '',
-                'title': info.get('title') or info.get('description') or 'No Title',
-                'description': info.get('description') or '',
-                'thumbnail': info.get('thumbnail') or (info.get('thumbnails')[-1]['url'] if info.get('thumbnails') else ''),
-                'uploader': info.get('uploader') or info.get('uploader_id') or 'Unknown',
-                'duration': float(info.get('duration') or 0),
-                'raw_video_url': video_url,
-                'extractor': info.get('extractor') or ''
-            }
-
-            return {
-                'metadata': metadata,
-                'cookie_header': cookie_header
-            }
-    except Exception as ytdlp_err:
-        logger.warning(f"yt-dlp parsing failed: {str(ytdlp_err)[:100]}. Trying Douyin web post API...")
+        return parse_video_mobile_html(url)
+    except Exception as mobile_err:
+        logger.warning(f"Mobile HTML Scraper failed: {str(mobile_err)[:100]}. Trying local yt-dlp...")
+        
+        # Step 2: Try local yt-dlp
         try:
-            return parse_video_douyin_web(url)
-        except Exception as web_err:
-            logger.warning(f"Douyin web post API failed: {str(web_err)[:100]}. Trying Mobile HTML Scraper...")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+
+                if 'entries' in info:
+                    entries = list(info['entries'])
+                    if not entries:
+                        raise ValueError("No video entries found in the URL")
+                    info = entries[0]
+
+                video_url = info.get('url')
+
+                if not video_url and info.get('formats'):
+                    formats = info.get('formats', [])
+                    valid_formats = [f for f in formats if f.get('url')]
+                    if valid_formats:
+                        video_url = valid_formats[-1]['url']
+
+                if not video_url:
+                    raise ValueError("Could not extract a direct video download URL")
+
+                cookies = []
+                for c in ydl.cookiejar:
+                    cookies.append(f"{c.name}={c.value}")
+                cookie_header = "; ".join(cookies)
+
+                metadata = {
+                    'id': info.get('id') or '',
+                    'title': info.get('title') or info.get('description') or 'No Title',
+                    'description': info.get('description') or '',
+                    'thumbnail': info.get('thumbnail') or (info.get('thumbnails')[-1]['url'] if info.get('thumbnails') else ''),
+                    'uploader': info.get('uploader') or info.get('uploader_id') or 'Unknown',
+                    'duration': float(info.get('duration') or 0),
+                    'raw_video_url': video_url,
+                    'extractor': info.get('extractor') or ''
+                }
+
+                return {
+                    'metadata': metadata,
+                    'cookie_header': cookie_header
+                }
+        except Exception as ytdlp_err:
+            logger.warning(f"yt-dlp parsing failed: {str(ytdlp_err)[:100]}. Trying Douyin web post API...")
+            
+            # Step 3: Try Douyin web post API (uses cookies, checks user's own latest posts)
             try:
-                return parse_video_mobile_html(url)
-            except Exception as mobile_err:
-                logger.warning(f"Mobile HTML Scraper failed: {str(mobile_err)[:80]}. Trying douyin.wtf...")
+                return parse_video_douyin_web(url)
+            except Exception as web_err:
+                logger.warning(f"Douyin web post API failed: {str(web_err)[:100]}. Trying douyin.wtf...")
+                
+                # Step 4: Try douyin.wtf public API
                 try:
                     return parse_video_fallback(url)
                 except Exception as fallback_err_1:
                     logger.warning(f"douyin.wtf failed: {str(fallback_err_1)[:80]}. Trying pearktrue...")
+                    
+                    # Step 5: Try PearkTrue public API
                     try:
                         return parse_video_pearktrue(url)
                     except Exception as fallback_err_2:
-                        logger.error(f"All parsers failed. ytdlp={str(ytdlp_err)[:60]} web={str(web_err)[:60]}")
-                        raise ytdlp_err
+                        logger.error(f"All parsers failed. mobile_err={str(mobile_err)[:60]} ytdlp={str(ytdlp_err)[:60]} web_err={str(web_err)[:60]}")
+                        raise mobile_err
 
 
 
