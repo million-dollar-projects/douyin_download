@@ -34,16 +34,16 @@ TG_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@renzhiup")
 # Dynamically generate cookies.txt from environment variable if provided
 if COOKIES_CONTENT:
     try:
-        # Standardize literal newlines and tabs from input string
         cleaned_cookies = COOKIES_CONTENT.replace("\\n", "\n").replace("\\t", "\t").strip()
-        
-        # Only inject the Netscape header if it's not present in the content
         if "Netscape HTTP Cookie File" not in cleaned_cookies:
             cleaned_cookies = "# Netscape HTTP Cookie File\n" + cleaned_cookies
             
         with open("cookies.txt", "w", encoding="utf-8") as f:
             f.write(cleaned_cookies + "\n")
-        logger.info("Successfully loaded and generated cookies.txt from environment variable.")
+            
+        # Clean, reconstruct columns, and bridge to iesdouyin.com domain
+        sanitize_and_bridge_cookies("cookies.txt")
+        logger.info("Successfully loaded, generated and bridged cookies.txt from environment variable.")
     except Exception as e:
         logger.error(f"Failed to create cookies.txt from environment variable: {str(e)}")
 
@@ -67,6 +67,88 @@ class VideoMetadata(BaseModel):
     video_url: str  # 代理后的流媒体播放/下载链接
     raw_video_url: str  # 原始的 CDN 直连链接
     extractor: str
+
+def sanitize_and_bridge_cookies(file_path: str):
+    """Reads a cookie file, fixes wrapped lines, standardizes columns to tabs, clones douyin.com keys to iesdouyin.com, and writes it back."""
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        return
+        
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+            
+        raw_lines = content.strip().split('\n')
+        combined_lines = []
+        
+        # Phase 1: Merge wrapped lines
+        for line in raw_lines:
+            line_stripped = line.strip()
+            if not line_stripped:
+                continue
+            if line_stripped.startswith("#"):
+                combined_lines.append(line_stripped)
+                continue
+            
+            is_new_cookie = False
+            first_word = line_stripped.split()[0] if line_stripped.split() else ""
+            if first_word.startswith(".") or "douyin.com" in first_word or "tiktok.com" in first_word:
+                is_new_cookie = True
+                
+            if is_new_cookie:
+                combined_lines.append(line_stripped)
+            else:
+                if combined_lines and not combined_lines[-1].startswith("#"):
+                    prev_line = combined_lines[-1]
+                    if prev_line[-1].isspace() or line_stripped[0].isspace():
+                        combined_lines[-1] = prev_line + line_stripped
+                    else:
+                        combined_lines[-1] = prev_line + " " + line_stripped
+                else:
+                    combined_lines.append(line_stripped)
+                    
+        # Phase 2: Convert to tab separation, clone keys to iesdouyin.com
+        cleaned_lines = []
+        cloned_lines = []
+        for line in combined_lines:
+            if line.startswith("#"):
+                cleaned_lines.append(line)
+                continue
+            
+            parts = line.split('\t')
+            if len(parts) < 3:
+                parts = re.split(r'\s+', line)
+                
+            if len(parts) == 6:
+                parts.append("")
+                
+            if len(parts) == 7:
+                # Force domain_specified flag to perfectly align with dot prefix to satisfy python's cookiejar assert
+                starts_with_dot = parts[0].startswith(".")
+                parts[1] = "TRUE" if starts_with_dot else "FALSE"
+                cleaned_lines.append("\t".join(parts))
+                
+                # Clone to iesdouyin.com
+                domain = parts[0]
+                cookie_name = parts[5]
+                if ("douyin.com" in domain) and ("iesdouyin.com" not in domain):
+                    essential_keys = [
+                        "sessionid", "sessionid_ss", "uid_tt", "uid_tt_ss", 
+                        "sid_tt", "passport_csrf_token", "__ac_nonce", "__ac_signature"
+                    ]
+                    if cookie_name in essential_keys:
+                        cloned_parts = list(parts)
+                        cloned_parts[0] = ".iesdouyin.com"
+                        cloned_parts[1] = "TRUE"  # Enforce domain_specified flag to match dot prefix for cookiejar compatibility
+                        cloned_lines.append("\t".join(cloned_parts))
+            
+        cleaned_lines.extend(cloned_lines)
+        final_cookies_text = "# Netscape HTTP Cookie File\n" + "\n".join(cleaned_lines) + "\n"
+        
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(final_cookies_text)
+        logger.info(f"Successfully sanitized and bridged cookies in {file_path}")
+    except Exception as e:
+        logger.error(f"Failed to sanitize and bridge cookies file: {str(e)}")
 
 def extract_http_url(text: str) -> str:
     """Extracts the first HTTP/HTTPS URL from a string."""
@@ -194,8 +276,10 @@ def parse_video(url: str) -> dict:
     # Use cookies if available
     cookies_path = 'cookies.txt'
     if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
+        # Pre-process, fix wraps, format columns, and bridge to iesdouyin.com domain
+        sanitize_and_bridge_cookies(cookies_path)
         ydl_opts['cookiefile'] = cookies_path
-        logger.info(f"Using cookies from {cookies_path}")
+        logger.info(f"Using sanitized and bridged cookies from {cookies_path}")
         
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
