@@ -196,6 +196,21 @@ def set_user_mode(chat_id: int, mode: str):
     prefs[str(chat_id)] = mode
     save_user_prefs(prefs)
 
+def get_user_keyboard_markup(chat_id: int) -> types.ReplyKeyboardMarkup:
+    """Generates bottom reply keyboard with direct vs channel selection buttons."""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    if not TG_CHANNEL:
+        # If no channel is configured, just show a simple helper button
+        btn = types.KeyboardButton("📥 直接返回给您 ✅")
+        markup.add(btn)
+        return markup
+
+    current_mode = get_user_mode(chat_id)
+    btn_direct = types.KeyboardButton("📥 直接返回给您" + (" ✅" if current_mode == "direct" else ""))
+    btn_channel = types.KeyboardButton("📤 发送到频道" + (" ✅" if current_mode == "channel" else ""))
+    markup.add(btn_direct, btn_channel)
+    return markup
+
 
 # ==========================================
 # Bot Initialization
@@ -1096,94 +1111,48 @@ if bot:
     async def send_welcome(message):
         welcome_text = (
             "👋 **欢迎使用抖音 & TikTok 无水印视频下载机器人！**\n\n"
-            "直接向我发送抖音或 TikTok 的分享链接（支持整段分享文本），我就会为您解析无水印的高清视频。\n\n"
-            "⚙️ **设置发送方式**：\n"
-            "点击下方的 **⚙️ 机器人设置** 按钮，或者在左下角菜单中选择 `/settings`，即可自由切换视频是**发送到 Telegram 频道**还是**直接在聊天中返回给您**。系统会自动记住您的选择。\n\n"
+            "直接向我发送抖音或 TikTok 的分享链接（支持整段分享文本），我就会为您解析并获取无水印的高清视频。\n\n"
+            "⚙️ **模式切换**：\n"
+            "您可以通过点击下方的底部键盘按钮，即时切换接收模式（系统会记住您的选择，并在当前选中的模式后标有 ✅）。\n\n"
             "💡 示例链接：\n"
             "• `https://v.douyin.com/xxxx/`\n"
             "• `https://www.tiktok.com/@user/video/xxxx`"
         )
-        # Create a reply keyboard layout with a persistent "⚙️ 机器人设置" button
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
-        btn_settings = types.KeyboardButton("⚙️ 机器人设置")
-        markup.add(btn_settings)
+        markup = get_user_keyboard_markup(message.chat.id)
         await bot.reply_to(message, welcome_text, reply_markup=markup, parse_mode="Markdown")
-
-    @bot.message_handler(func=lambda message: message.text == "⚙️ 机器人设置")
-    async def handle_settings_button(message):
-        await show_settings(message)
 
     @bot.message_handler(commands=['settings'])
     async def show_settings(message):
-        if not TG_CHANNEL:
-            await bot.reply_to(
-                message, 
-                "ℹ️ **机器人未配置默认频道。** 所有解析视频都将直接返回发送给您。\n"
-                "如果您是管理员，可以通过在服务器环境变量中设置 `TELEGRAM_CHANNEL` 来启用频道同步功能。"
-            )
-            return
-
         current_mode = get_user_mode(message.chat.id)
         mode_text = "📤 **发送到频道**" if current_mode == "channel" else "📥 **直接返回给您**"
         
-        markup = types.InlineKeyboardMarkup()
-        btn_channel = types.InlineKeyboardButton(
-            text="📤 发送到频道" + (" ✅" if current_mode == "channel" else ""),
-            callback_data="set_mode_channel"
-        )
-        btn_direct = types.InlineKeyboardButton(
-            text="📥 直接返回给您" + (" ✅" if current_mode == "direct" else ""),
-            callback_data="set_mode_direct"
-        )
-        markup.add(btn_channel)
-        markup.add(btn_direct)
-
-        await bot.reply_to(
-            message,
+        welcome_text = (
             f"⚙️ **机器人接收设置**\n\n"
             f"当前模式：{mode_text}\n\n"
-            f"请选择视频解析后的发送方式（系统将记住您的选择）：",
-            reply_markup=markup,
-            parse_mode="Markdown"
+            f"您可以通过轻点下方的底部键盘按钮来直接切换模式。"
         )
+        markup = get_user_keyboard_markup(message.chat.id)
+        await bot.reply_to(message, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
-    @bot.callback_query_handler(func=lambda call: call.data.startswith("set_mode_"))
-    async def handle_callback_query(call):
-        chat_id = call.message.chat.id
-        action = call.data
-        
-        if action == "set_mode_channel":
-            set_user_mode(chat_id, "channel")
-            new_mode_text = "📤 **发送到频道**"
-        elif action == "set_mode_direct":
+    @bot.message_handler(func=lambda message: message.text and ("直接返回给您" in message.text or "发送到频道" in message.text))
+    async def handle_settings_toggle(message):
+        chat_id = message.chat.id
+        text = message.text
+
+        if "直接返回给您" in text:
             set_user_mode(chat_id, "direct")
-            new_mode_text = "📥 **直接返回给您**"
+            reply_text = "✨ 设置已更新！解析后的视频将**直接在聊天中发送给您**。"
+        elif "发送到频道" in text:
+            if not TG_CHANNEL:
+                await bot.reply_to(message, "⚠️ 未配置默认频道，无法切换到该模式。")
+                return
+            set_user_mode(chat_id, "channel")
+            reply_text = f"✨ 设置已更新！解析后的视频将**同步发送至频道 {TG_CHANNEL}**。"
         else:
             return
 
-        markup = types.InlineKeyboardMarkup()
-        btn_channel = types.InlineKeyboardButton(
-            text="📤 发送到频道" + (" ✅" if action == "set_mode_channel" else ""),
-            callback_data="set_mode_channel"
-        )
-        btn_direct = types.InlineKeyboardButton(
-            text="📥 直接返回给您" + (" ✅" if action == "set_mode_direct" else ""),
-            callback_data="set_mode_direct"
-        )
-        markup.add(btn_channel)
-        markup.add(btn_direct)
-
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=call.message.message_id,
-                text=f"⚙️ **机器人接收设置**\n\n当前模式：{new_mode_text}\n\n设置已更新并保存！",
-                reply_markup=markup,
-                parse_mode="Markdown"
-            )
-            await bot.answer_callback_query(call.id, text="设置保存成功！")
-        except Exception as e:
-            logger.error(f"Error handling callback query: {e}")
+        markup = get_user_keyboard_markup(chat_id)
+        await bot.reply_to(message, reply_text, reply_markup=markup, parse_mode="Markdown")
 
     @bot.message_handler(func=lambda message: True)
     async def handle_message(message):
