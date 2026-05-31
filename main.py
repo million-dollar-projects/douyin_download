@@ -950,6 +950,17 @@ async def auto_refresh_douyin_tokens():
 
 @app.on_event("startup")
 async def on_startup():
+    # Register bot commands in Telegram Menu button
+    if bot:
+        try:
+            await bot.set_my_commands([
+                types.BotCommand("start", "开始使用 / 帮助说明"),
+                types.BotCommand("settings", "配置接收模式 (直接返回/发送到频道)"),
+            ])
+            logger.info("Telegram Bot commands registered successfully.")
+        except Exception as e:
+            logger.error(f"Failed to register Telegram Bot commands: {str(e)}")
+
     # Start the self-ping keep alive task
     if RENDER_EXTERNAL_URL:
         asyncio.create_task(self_keep_alive())
@@ -1087,12 +1098,20 @@ if bot:
             "👋 **欢迎使用抖音 & TikTok 无水印视频下载机器人！**\n\n"
             "直接向我发送抖音或 TikTok 的分享链接（支持整段分享文本），我就会为您解析无水印的高清视频。\n\n"
             "⚙️ **设置发送方式**：\n"
-            "发送 /settings 命令，您可以选择将视频**发送到 Telegram 频道**或**直接在聊天中返回给您**。系统会自动记住您的选择。\n\n"
+            "点击下方的 **⚙️ 机器人设置** 按钮，或者在左下角菜单中选择 `/settings`，即可自由切换视频是**发送到 Telegram 频道**还是**直接在聊天中返回给您**。系统会自动记住您的选择。\n\n"
             "💡 示例链接：\n"
             "• `https://v.douyin.com/xxxx/`\n"
             "• `https://www.tiktok.com/@user/video/xxxx`"
         )
-        await bot.reply_to(message, welcome_text, parse_mode="Markdown")
+        # Create a reply keyboard layout with a persistent "⚙️ 机器人设置" button
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+        btn_settings = types.KeyboardButton("⚙️ 机器人设置")
+        markup.add(btn_settings)
+        await bot.reply_to(message, welcome_text, reply_markup=markup, parse_mode="Markdown")
+
+    @bot.message_handler(func=lambda message: message.text == "⚙️ 机器人设置")
+    async def handle_settings_button(message):
+        await show_settings(message)
 
     @bot.message_handler(commands=['settings'])
     async def show_settings(message):
