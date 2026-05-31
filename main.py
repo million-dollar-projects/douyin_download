@@ -164,6 +164,39 @@ if COOKIES_CONTENT:
         logger.error(f"Failed to create cookies.txt from environment variable: {str(e)}")
 
 
+USER_PREFS_FILE = "user_preferences.json"
+
+def load_user_prefs() -> dict:
+    """Loads user preferences from user_preferences.json file."""
+    if os.path.exists(USER_PREFS_FILE):
+        try:
+            with open(USER_PREFS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load user preferences: {e}")
+            return {}
+    return {}
+
+def save_user_prefs(prefs: dict):
+    """Saves user preferences to user_preferences.json file."""
+    try:
+        with open(USER_PREFS_FILE, "w", encoding="utf-8") as f:
+            json.dump(prefs, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save user preferences: {e}")
+
+def get_user_mode(chat_id: int) -> str:
+    """Returns 'channel' if target is channel, or 'direct' if target is the user's private chat."""
+    prefs = load_user_prefs()
+    return prefs.get(str(chat_id), "channel" if TG_CHANNEL else "direct")
+
+def set_user_mode(chat_id: int, mode: str):
+    """Sets user mode preference and saves to file."""
+    prefs = load_user_prefs()
+    prefs[str(chat_id)] = mode
+    save_user_prefs(prefs)
+
+
 # ==========================================
 # Bot Initialization
 # ==========================================
@@ -1052,12 +1085,86 @@ if bot:
     async def send_welcome(message):
         welcome_text = (
             "👋 **欢迎使用抖音 & TikTok 无水印视频下载机器人！**\n\n"
-            "直接向我发送抖音或 TikTok 的分享链接（支持整段分享文本），我就会为您解析并直接把去水印的高清视频发送给您。\n\n"
+            "直接向我发送抖音或 TikTok 的分享链接（支持整段分享文本），我就会为您解析无水印的高清视频。\n\n"
+            "⚙️ **设置发送方式**：\n"
+            "发送 /settings 命令，您可以选择将视频**发送到 Telegram 频道**或**直接在聊天中返回给您**。系统会自动记住您的选择。\n\n"
             "💡 示例链接：\n"
             "• `https://v.douyin.com/xxxx/`\n"
             "• `https://www.tiktok.com/@user/video/xxxx`"
         )
         await bot.reply_to(message, welcome_text, parse_mode="Markdown")
+
+    @bot.message_handler(commands=['settings'])
+    async def show_settings(message):
+        if not TG_CHANNEL:
+            await bot.reply_to(
+                message, 
+                "ℹ️ **机器人未配置默认频道。** 所有解析视频都将直接返回发送给您。\n"
+                "如果您是管理员，可以通过在服务器环境变量中设置 `TELEGRAM_CHANNEL` 来启用频道同步功能。"
+            )
+            return
+
+        current_mode = get_user_mode(message.chat.id)
+        mode_text = "📤 **发送到频道**" if current_mode == "channel" else "📥 **直接返回给您**"
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_channel = types.InlineKeyboardButton(
+            text="📤 发送到频道" + (" ✅" if current_mode == "channel" else ""),
+            callback_data="set_mode_channel"
+        )
+        btn_direct = types.InlineKeyboardButton(
+            text="📥 直接返回给您" + (" ✅" if current_mode == "direct" else ""),
+            callback_data="set_mode_direct"
+        )
+        markup.add(btn_channel)
+        markup.add(btn_direct)
+
+        await bot.reply_to(
+            message,
+            f"⚙️ **机器人接收设置**\n\n"
+            f"当前模式：{mode_text}\n\n"
+            f"请选择视频解析后的发送方式（系统将记住您的选择）：",
+            reply_markup=markup,
+            parse_mode="Markdown"
+        )
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("set_mode_"))
+    async def handle_callback_query(call):
+        chat_id = call.message.chat.id
+        action = call.data
+        
+        if action == "set_mode_channel":
+            set_user_mode(chat_id, "channel")
+            new_mode_text = "📤 **发送到频道**"
+        elif action == "set_mode_direct":
+            set_user_mode(chat_id, "direct")
+            new_mode_text = "📥 **直接返回给您**"
+        else:
+            return
+
+        markup = types.InlineKeyboardMarkup()
+        btn_channel = types.InlineKeyboardButton(
+            text="📤 发送到频道" + (" ✅" if action == "set_mode_channel" else ""),
+            callback_data="set_mode_channel"
+        )
+        btn_direct = types.InlineKeyboardButton(
+            text="📥 直接返回给您" + (" ✅" if action == "set_mode_direct" else ""),
+            callback_data="set_mode_direct"
+        )
+        markup.add(btn_channel)
+        markup.add(btn_direct)
+
+        try:
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=call.message.message_id,
+                text=f"⚙️ **机器人接收设置**\n\n当前模式：{new_mode_text}\n\n设置已更新并保存！",
+                reply_markup=markup,
+                parse_mode="Markdown"
+            )
+            await bot.answer_callback_query(call.id, text="设置保存成功！")
+        except Exception as e:
+            logger.error(f"Error handling callback query: {e}")
 
     @bot.message_handler(func=lambda message: True)
     async def handle_message(message):
@@ -1126,10 +1233,12 @@ if bot:
                 if actual_size > 50 * 1024 * 1024:
                     raise ValueError("视频下载文件实际大小超过 50MB")
 
-                # Determine target for video: channel if configured, otherwise user
-                target_chat = TG_CHANNEL if TG_CHANNEL else message.chat.id
+                # Determine target for video based on user preferences and configuration
+                user_mode = get_user_mode(message.chat.id)
+                is_uploading_to_channel = TG_CHANNEL and user_mode == "channel"
+                target_chat = TG_CHANNEL if is_uploading_to_channel else message.chat.id
 
-                upload_msg_text = "📤 正在上传视频到频道..." if TG_CHANNEL else "📤 正在上传视频到 Telegram..."
+                upload_msg_text = "📤 正在上传视频到频道..." if is_uploading_to_channel else "📤 正在上传视频到 Telegram..."
                 await bot.edit_message_text(
                     text=upload_msg_text,
                     chat_id=message.chat.id,
@@ -1152,8 +1261,8 @@ if bot:
                 await bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
 
                 # Send final confirmation message to user if synced to channel
-                if TG_CHANNEL:
-                    await bot.reply_to(message, f"🎉 视频解析成功，已同步发送至频道 {TG_CHANNEL}！")
+                if is_uploading_to_channel:
+                    await bot.reply_to(message, f"🎉 视频解析成功，已发送至频道 {TG_CHANNEL}！")
 
             except Exception as dl_upload_err:
                 logger.warning(f"Failed to post video directly: {str(dl_upload_err)}")
@@ -1175,7 +1284,7 @@ if bot:
                     f"[📥 点击下载无水印视频]({proxy_download_url})"
                 )
 
-                if TG_CHANNEL:
+                if is_uploading_to_channel:
                     try:
                         # Try to post the link fallback message to the channel
                         await bot.send_message(
