@@ -1186,6 +1186,11 @@ if bot:
                 message_id=status_msg.message_id
             )
 
+            # Determine target for video based on user preferences and configuration
+            user_mode = get_user_mode(message.chat.id)
+            is_uploading_to_channel = bool(TG_CHANNEL and user_mode == "channel")
+            target_chat = TG_CHANNEL if is_uploading_to_channel else message.chat.id
+
             # Start downloading video stream
             req_referer = target_url
             headers = {
@@ -1220,11 +1225,6 @@ if bot:
                 actual_size = os.path.getsize(temp_path)
                 if actual_size > 50 * 1024 * 1024:
                     raise ValueError("视频下载文件实际大小超过 50MB")
-
-                # Determine target for video based on user preferences and configuration
-                user_mode = get_user_mode(message.chat.id)
-                is_uploading_to_channel = TG_CHANNEL and user_mode == "channel"
-                target_chat = TG_CHANNEL if is_uploading_to_channel else message.chat.id
 
                 upload_msg_text = "📤 正在上传视频到频道..." if is_uploading_to_channel else "📤 正在上传视频到 Telegram..."
                 await bot.edit_message_text(
