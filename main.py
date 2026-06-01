@@ -1242,7 +1242,8 @@ if bot:
                         chat_id=target_chat,
                         video=video_file,
                         caption=caption,
-                        supports_streaming=True
+                        supports_streaming=True,
+                        timeout=300  # Extend upload timeout to 5 minutes to prevent transient failures on Render
                     )
 
                 # Delete the loading status message
