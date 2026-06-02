@@ -6,7 +6,7 @@ import urllib.parse
 import urllib.request
 import tempfile
 import asyncio
-from fastapi import FastAPI, HTTPException, status, Query, Request
+from fastapi import FastAPI, HTTPException, status, Query, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
 import httpx
@@ -1088,7 +1088,7 @@ async def update_cookies_endpoint(request: Request):
 
 
 @app.post("/tg-webhook/{token}")
-async def tg_webhook(token: str, request: Request):
+async def tg_webhook(token: str, request: Request, background_tasks: BackgroundTasks):
     if not bot or token != TG_BOT_TOKEN:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1098,10 +1098,12 @@ async def tg_webhook(token: str, request: Request):
         body = await request.body()
         json_string = body.decode("utf-8")
         update = types.Update.de_json(json_string)
-        await bot.process_new_updates([update])
+        # Offload update processing to a background task so we return 200 OK immediately.
+        # This prevents Telegram from retrying the request due to connection timeouts.
+        background_tasks.add_task(bot.process_new_updates, [update])
         return {"status": "ok"}
     except Exception as e:
-        logger.error(f"Error processing Telegram update: {str(e)}")
+        logger.error(f"Error scheduling Telegram update: {str(e)}")
         return {"status": "error", "message": str(e)}
 
 
