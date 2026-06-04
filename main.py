@@ -6,6 +6,8 @@ import urllib.parse
 import urllib.request
 import tempfile
 import asyncio
+import gc
+import ctypes
 from fastapi import FastAPI, HTTPException, status, Query, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -32,9 +34,16 @@ COOKIES_CONTENT = os.getenv("COOKIES_CONTENT")
 TG_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@renzhiup")
 
 
-# ==========================================
-# Utility Functions (must be defined first)
-# ==========================================
+def clean_memory():
+    """Forces Python garbage collection and trims memory allocator memory on Linux (Render)."""
+    gc.collect()
+    try:
+        # malloc_trim is a GNU libc extension available on Linux (like Render)
+        # It releases free memory from the allocator back to the OS.
+        libc = ctypes.CDLL(None)
+        libc.malloc_trim(0)
+    except Exception:
+        pass
 
 def sanitize_and_bridge_cookies(file_path: str):
     """Reads a cookie file, fixes wrapped lines, standardizes columns to tabs, clones douyin.com keys to iesdouyin.com, and writes it back."""
@@ -757,41 +766,44 @@ async def health():
 @app.post("/parse", response_model=VideoMetadata)
 async def parse(request: Request, req_body: ParseRequest):
     try:
-        target_url = extract_http_url(req_body.url)
-        logger.info(f"Parsing URL: {target_url}")
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-
-    try:
-        result = parse_video(target_url)
-        metadata = result['metadata']
-        cookie_header = result['cookie_header']
-
-        # Build the proxy streaming URL
-        encoded_cdn_url = urllib.parse.quote(metadata['raw_video_url'])
-        encoded_cookies = urllib.parse.quote(cookie_header)
-        encoded_orig_url = urllib.parse.quote(target_url)
-
-        # Build the proxy URL dynamically based on the request host
-        proxy_url = f"{request.base_url}stream?url={encoded_cdn_url}&cookies={encoded_cookies}&referer={encoded_orig_url}"
-
-        metadata['video_url'] = proxy_url
-        return metadata
-    except Exception as e:
-        error_msg = str(e)
-        cleaned_msg = clean_error_message(error_msg)
-        if "Unsupported URL" in error_msg:
+        try:
+            target_url = extract_http_url(req_body.url)
+            logger.info(f"Parsing URL: {target_url}")
+        except ValueError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e)
+            )
+
+        try:
+            result = parse_video(target_url)
+            metadata = result['metadata']
+            cookie_header = result['cookie_header']
+
+            # Build the proxy streaming URL
+            encoded_cdn_url = urllib.parse.quote(metadata['raw_video_url'])
+            encoded_cookies = urllib.parse.quote(cookie_header)
+            encoded_orig_url = urllib.parse.quote(target_url)
+
+            # Build the proxy URL dynamically based on the request host
+            proxy_url = f"{request.base_url}stream?url={encoded_cdn_url}&cookies={encoded_cookies}&referer={encoded_orig_url}"
+
+            metadata['video_url'] = proxy_url
+            return metadata
+        except Exception as e:
+            error_msg = str(e)
+            cleaned_msg = clean_error_message(error_msg)
+            if "Unsupported URL" in error_msg:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=cleaned_msg
+                )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=cleaned_msg
             )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=cleaned_msg
-        )
+    finally:
+        clean_memory()
 
 @app.get("/stream")
 async def stream_video(
@@ -826,6 +838,8 @@ async def stream_video(
             except Exception as e:
                 logger.error(f"Error during video streaming proxy: {str(e)}")
                 return
+            finally:
+                clean_memory()
 
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
@@ -961,6 +975,7 @@ async def auto_refresh_douyin_tokens():
             logger.warning(f"Auto-refresh token task error: {str(e)}")
 
         # Refresh every 15 minutes (well within the ~30min expiry window)
+        clean_memory()
         await asyncio.sleep(900)
 
 @app.on_event("startup")
@@ -1311,6 +1326,7 @@ if bot:
                         os.remove(temp_path)
                     except Exception as cleanup_err:
                         logger.error(f"Failed to remove temp file: {str(cleanup_err)}")
+                clean_memory()
 
         except Exception as parse_error:
             logger.error(f"Bot handler parse error: {str(parse_error)}")
