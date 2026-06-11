@@ -1240,8 +1240,10 @@ if bot:
 
                 # Double check size on disk
                 actual_size = os.path.getsize(temp_path)
+                if actual_size == 0:
+                    raise ValueError("下载的视频文件大小为 0 字节，可能下载失败")
                 if actual_size > 50 * 1024 * 1024:
-                    raise ValueError("视频下载文件实际大小超过 50MB")
+                    raise ValueError("视频下载文件实际大小超过 50MB 限制")
 
                 upload_msg_text = "📤 正在上传视频到频道..." if is_uploading_to_channel else "📤 正在上传视频到 Telegram..."
                 await bot.edit_message_text(
@@ -1281,11 +1283,18 @@ if bot:
 
                 proxy_download_url = f"{base_url}stream?url={encoded_cdn}&cookies={encoded_cookies}&referer={encoded_orig}&download=1"
 
+                # Truncate and clean the error message for markdown
+                err_details = str(dl_upload_err)
+                escaped_err = err_details.replace("*", "\\*").replace("_", "\\_").replace("[", "\\[").replace("]", "\\]").replace("`", "\\`")
+                if len(escaped_err) > 150:
+                    escaped_err = escaped_err[:147] + "..."
+
                 fallback_text = (
                     f"🎬 **{metadata.get('title', '视频解析成功')}**\n\n"
                     f"👤 作者: {metadata.get('uploader', '未知')}\n"
                     f"⏱️ 时长: {metadata.get('duration', 0)}秒\n\n"
                     f"⚠️ 因视频文件过大 (>50MB) 或机器人权限受限，未能直接上传视频文件。\n"
+                    f"*(错误详情: {escaped_err})*\n"
                     f"🔗 您可以点击下方链接直接下载高清无水印视频：\n\n"
                     f"[📥 点击下载无水印视频]({proxy_download_url})"
                 )
@@ -1299,7 +1308,7 @@ if bot:
                             parse_mode="Markdown"
                         )
                         await bot.edit_message_text(
-                            text=f"🎉 视频解析成功！但因文件过大或权限受限未能直接上传视频，已将下载链接同步发布到频道 {TG_CHANNEL}。\n\n[📥 点击直接下载]({proxy_download_url})",
+                            text=f"🎉 视频解析成功！但因文件过大或权限受限未能直接上传视频，已将下载链接同步发布到频道 {TG_CHANNEL}。\n\n*(错误详情: {escaped_err})*\n\n[📥 点击直接下载]({proxy_download_url})",
                             chat_id=message.chat.id,
                             message_id=status_msg.message_id,
                             parse_mode="Markdown"
