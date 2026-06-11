@@ -8,6 +8,8 @@ import tempfile
 import asyncio
 import gc
 import ctypes
+import uuid
+import time
 from fastapi import FastAPI, HTTPException, status, Query, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
@@ -219,6 +221,29 @@ def get_user_keyboard_markup(chat_id: int) -> types.ReplyKeyboardMarkup:
     btn_channel = types.KeyboardButton("📤 发送到频道" + (" ✅" if current_mode == "channel" else ""))
     markup.add(btn_direct, btn_channel)
     return markup
+
+
+RETRY_CACHE = {}
+
+def cache_retry_url(url: str) -> str:
+    """Caches retry URL and returns a short retry ID."""
+    now = time.time()
+    # Clean up old entries (e.g. older than 1 hour) to prevent memory leak
+    expired_ids = [k for k, v in RETRY_CACHE.items() if now - v[1] > 3600]
+    for k in expired_ids:
+        RETRY_CACHE.pop(k, None)
+        
+    retry_id = str(uuid.uuid4())[:8]
+    RETRY_CACHE[retry_id] = (url, now)
+    return retry_id
+
+def get_cached_retry_url(retry_id: str) -> str:
+    """Retrieves cached retry URL by its ID."""
+    entry = RETRY_CACHE.get(retry_id)
+    if entry:
+        return entry[0]
+    return None
+
 
 
 # ==========================================
@@ -1171,25 +1196,7 @@ if bot:
         markup = get_user_keyboard_markup(chat_id)
         await bot.reply_to(message, reply_text, reply_markup=markup, parse_mode="Markdown")
 
-    @bot.message_handler(func=lambda message: True)
-    async def handle_message(message):
-        text = message.text
-        if not text:
-            return
-
-        try:
-            target_url = extract_http_url(text)
-        except ValueError:
-            await bot.reply_to(message, "⚠️ 未在您的消息中检测到有效的链接，请发送正确的抖音或 TikTok 分享文本。")
-            return
-
-        # Simple verification of domains
-        if not any(domain in target_url for domain in ["douyin.com", "tiktok.com", "amemv.com"]):
-            await bot.reply_to(message, "⚠️ 该链接不属于支持的平台（抖音/TikTok），请检查后重新发送。")
-            return
-
-        status_msg = await bot.reply_to(message, "⏳ 正在解析链接，请稍候...")
-
+    async def process_video_download_and_upload(chat_id: int, target_url: str, status_msg, is_retry: bool = False):
         try:
             # Parse video using existing logic
             result = parse_video(target_url)
@@ -1199,14 +1206,14 @@ if bot:
 
             await bot.edit_message_text(
                 text="📥 视频解析成功，正在下载并准备无水印高清视频文件...",
-                chat_id=message.chat.id,
+                chat_id=chat_id,
                 message_id=status_msg.message_id
             )
 
             # Determine target for video based on user preferences and configuration
-            user_mode = get_user_mode(message.chat.id)
+            user_mode = get_user_mode(chat_id)
             is_uploading_to_channel = bool(TG_CHANNEL and user_mode == "channel")
-            target_chat = TG_CHANNEL if is_uploading_to_channel else message.chat.id
+            target_chat = TG_CHANNEL if is_uploading_to_channel else chat_id
 
             # Start downloading video stream
             req_referer = target_url
@@ -1241,14 +1248,14 @@ if bot:
                 # Double check size on disk
                 actual_size = os.path.getsize(temp_path)
                 if actual_size == 0:
-                    raise ValueError("下载的视频文件大小为 0 字节，可能下载失败")
+                    raise ValueError("下载 of 视频文件大小为 0 字节，可能下载失败")
                 if actual_size > 50 * 1024 * 1024:
                     raise ValueError("视频下载文件实际大小超过 50MB 限制")
 
                 upload_msg_text = "📤 正在上传视频到频道..." if is_uploading_to_channel else "📤 正在上传视频到 Telegram..."
                 await bot.edit_message_text(
                     text=upload_msg_text,
-                    chat_id=message.chat.id,
+                    chat_id=chat_id,
                     message_id=status_msg.message_id
                 )
 
@@ -1266,11 +1273,11 @@ if bot:
                     )
 
                 # Delete the loading status message
-                await bot.delete_message(chat_id=message.chat.id, message_id=status_msg.message_id)
+                await bot.delete_message(chat_id=chat_id, message_id=status_msg.message_id)
 
                 # Send final confirmation message to user if synced to channel
                 if is_uploading_to_channel:
-                    await bot.reply_to(message, f"🎉 视频解析成功，已发送至频道 {TG_CHANNEL}！")
+                    await bot.send_message(chat_id=chat_id, text=f"🎉 视频解析成功，已发送至频道 {TG_CHANNEL}！")
 
             except Exception as dl_upload_err:
                 logger.warning(f"Failed to post video directly: {str(dl_upload_err)}")
@@ -1295,9 +1302,15 @@ if bot:
                     f"⏱️ 时长: {metadata.get('duration', 0)}秒\n\n"
                     f"⚠️ 因视频文件过大 (>50MB) 或机器人权限受限，未能直接上传视频文件。\n"
                     f"*(错误详情: {escaped_err})*\n"
-                    f"🔗 您可以点击下方链接直接下载高清无水印视频：\n\n"
-                    f"[📥 点击下载无水印视频]({proxy_download_url})"
+                    f"🔗 您可以点击下方按钮直接下载或重新上传："
                 )
+
+                retry_id = cache_retry_url(target_url)
+                markup = types.InlineKeyboardMarkup()
+                dl_btn = types.InlineKeyboardButton(text="📥 点击下载无水印视频", url=proxy_download_url)
+                retry_btn = types.InlineKeyboardButton(text="🔄 重新尝试上传", callback_data=f"retry_up:{retry_id}")
+                markup.row(dl_btn)
+                markup.row(retry_btn)
 
                 if is_uploading_to_channel:
                     try:
@@ -1305,27 +1318,31 @@ if bot:
                         await bot.send_message(
                             chat_id=TG_CHANNEL,
                             text=fallback_text,
+                            reply_markup=markup,
                             parse_mode="Markdown"
                         )
                         await bot.edit_message_text(
-                            text=f"🎉 视频解析成功！但因文件过大或权限受限未能直接上传视频，已将下载链接同步发布到频道 {TG_CHANNEL}。\n\n*(错误详情: {escaped_err})*\n\n[📥 点击直接下载]({proxy_download_url})",
-                            chat_id=message.chat.id,
+                            text=f"🎉 视频解析成功！但因文件过大或权限受限未能直接上传视频，已将下载链接同步发布到频道 {TG_CHANNEL}。\n\n*(错误详情: {escaped_err})*",
+                            chat_id=chat_id,
                             message_id=status_msg.message_id,
+                            reply_markup=markup,
                             parse_mode="Markdown"
                         )
                     except Exception as chan_err:
                         logger.error(f"Failed to send fallback message to channel: {str(chan_err)}")
                         await bot.edit_message_text(
                             text=fallback_text + f"\n\n*(发送至频道失败，请确保机器人已成为频道 {TG_CHANNEL} 的管理员。)*",
-                            chat_id=message.chat.id,
+                            chat_id=chat_id,
                             message_id=status_msg.message_id,
+                            reply_markup=markup,
                             parse_mode="Markdown"
                         )
                 else:
                     await bot.edit_message_text(
                         text=fallback_text,
-                        chat_id=message.chat.id,
+                        chat_id=chat_id,
                         message_id=status_msg.message_id,
+                        reply_markup=markup,
                         parse_mode="Markdown"
                     )
             finally:
@@ -1342,6 +1359,49 @@ if bot:
             error_msg = clean_error_message(str(parse_error))
             await bot.edit_message_text(
                 text=f"❌ 解析失败\n\n原因: {error_msg}",
-                chat_id=message.chat.id,
+                chat_id=chat_id,
                 message_id=status_msg.message_id
             )
+
+    @bot.message_handler(func=lambda message: True)
+    async def handle_message(message):
+        text = message.text
+        if not text:
+            return
+
+        try:
+            target_url = extract_http_url(text)
+        except ValueError:
+            await bot.reply_to(message, "⚠️ 未在您的消息中检测到有效的链接，请发送正确的抖音或 TikTok 分享文本。")
+            return
+
+        # Simple verification of domains
+        if not any(domain in target_url for domain in ["douyin.com", "tiktok.com", "amemv.com"]):
+            await bot.reply_to(message, "⚠️ 该链接不属于支持的平台（抖音/TikTok），请检查后重新发送。")
+            return
+
+        status_msg = await bot.reply_to(message, "⏳ 正在解析链接，请稍候...")
+        await process_video_download_and_upload(message.chat.id, target_url, status_msg)
+
+    @bot.callback_query_handler(func=lambda call: call.data and call.data.startswith("retry_up:"))
+    async def handle_retry_callback(call):
+        retry_id = call.data.split(":")[1]
+        target_url = get_cached_retry_url(retry_id)
+        if not target_url:
+            await bot.answer_callback_query(call.id, text="⚠️ 该重试链接已失效或超时，请重新发送原链接进行解析。", show_alert=True)
+            return
+
+        # Let the user know we are retrying
+        await bot.answer_callback_query(call.id, text="🔄 正在重新尝试上传...")
+        
+        # We edit the message with the retry button to show it is loading
+        try:
+            await bot.edit_message_text(
+                text="⏳ 正在重新解析链接并尝试上传视频，请稍候...",
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id
+            )
+        except Exception as edit_err:
+            logger.error(f"Failed to edit callback message text: {edit_err}")
+            
+        await process_video_download_and_upload(call.message.chat.id, target_url, call.message, is_retry=True)
