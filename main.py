@@ -147,7 +147,7 @@ def clean_error_message(error_msg: str) -> str:
     if "Fresh cookies (not necessarily logged in) are needed" in cleaned:
         return "解析失败：该平台（抖音/TikTok）目前强化了防爬虫限制，需要有效的 Cookie。请获取您浏览器的 Netscape 格式 Cookie 并保存到项目根目录下的 cookies.txt 文件中。"
     if "Unsupported URL" in cleaned:
-        return "解析失败：暂不支持该链接，请确认输入的是抖音（Douyin）或 TikTok 的有效视频分享链接。"
+        return "解析失败：暂不支持该链接，请确认输入的是抖音 (Douyin)、TikTok 或 X (Twitter) 的有效视频分享链接。"
     if "Your IP address is blocked" in cleaned or "HTTP Error 403" in cleaned:
         return "解析失败：服务器 IP 被平台暂时封禁/限制访问，请尝试配置代理或在 cookies.txt 中加入 Cookie 凭证。"
 
@@ -698,6 +698,59 @@ def parse_video(url: str) -> dict:
         ydl_opts['cookiefile'] = cookies_path
         logger.info(f"Using sanitized and bridged cookies from {cookies_path}")
 
+    # Special handling for Twitter/X URLs to bypass Mobile HTML scraper and Douyin fallback paths
+    is_twitter = any(domain in url for domain in ["x.com", "twitter.com"])
+    if is_twitter:
+        logger.info(f"Using direct yt-dlp parsing for Twitter/X URL: {url}")
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+
+                if 'entries' in info:
+                    entries = list(info['entries'])
+                    if not entries:
+                        raise ValueError("No video entries found in the URL")
+                    info = entries[0]
+
+                video_url = info.get('url')
+
+                if not video_url and info.get('formats'):
+                    formats = info.get('formats', [])
+                    valid_formats = [f for f in formats if f.get('url')]
+                    if valid_formats:
+                        video_url = valid_formats[-1]['url']
+
+                if not video_url:
+                    raise ValueError("Could not extract a direct video download URL")
+
+                cookies = []
+                for c in ydl.cookiejar:
+                    cookies.append(f"{c.name}={c.value}")
+                cookie_header = "; ".join(cookies)
+
+                extractor_name = info.get('extractor') or ''
+                if extractor_name.lower() in ['twitter', 'twitter:legacy']:
+                    extractor_name = 'Twitter / X'
+
+                metadata = {
+                    'id': info.get('id') or '',
+                    'title': info.get('title') or info.get('description') or 'No Title',
+                    'description': info.get('description') or '',
+                    'thumbnail': info.get('thumbnail') or (info.get('thumbnails')[-1]['url'] if info.get('thumbnails') else ''),
+                    'uploader': info.get('uploader') or info.get('uploader_id') or 'Unknown',
+                    'duration': float(info.get('duration') or 0),
+                    'raw_video_url': video_url,
+                    'extractor': extractor_name
+                }
+
+                return {
+                    'metadata': metadata,
+                    'cookie_header': cookie_header
+                }
+        except Exception as ytdlp_err:
+            logger.error(f"Twitter/X parsing failed: {str(ytdlp_err)}")
+            raise ytdlp_err
+
     # Step 1: Try Mobile HTML Scraper (fastest, no cookies/signatures needed for public videos)
     try:
         return parse_video_mobile_html(url)
@@ -731,6 +784,10 @@ def parse_video(url: str) -> dict:
                     cookies.append(f"{c.name}={c.value}")
                 cookie_header = "; ".join(cookies)
 
+                extractor_name = info.get('extractor') or ''
+                if extractor_name.lower() in ['twitter', 'twitter:legacy']:
+                    extractor_name = 'Twitter / X'
+
                 metadata = {
                     'id': info.get('id') or '',
                     'title': info.get('title') or info.get('description') or 'No Title',
@@ -739,7 +796,7 @@ def parse_video(url: str) -> dict:
                     'uploader': info.get('uploader') or info.get('uploader_id') or 'Unknown',
                     'duration': float(info.get('duration') or 0),
                     'raw_video_url': video_url,
-                    'extractor': info.get('extractor') or ''
+                    'extractor': extractor_name
                 }
 
                 return {
@@ -1152,13 +1209,14 @@ if bot:
     @bot.message_handler(commands=['start', 'help'])
     async def send_welcome(message):
         welcome_text = (
-            "👋 **欢迎使用抖音 & TikTok 无水印视频下载机器人！**\n\n"
-            "直接向我发送抖音或 TikTok 的分享链接（支持整段分享文本），我就会为您解析并获取无水印的高清视频。\n\n"
+            "👋 **欢迎使用抖音 & TikTok & X (Twitter) 视频下载机器人！**\n\n"
+            "直接向我发送抖音、TikTok 或 X (Twitter) 的分享链接（支持整段分享文本），我就会为您解析并获取高清视频。\n\n"
             "⚙️ **模式切换**：\n"
             "您可以通过点击下方的底部键盘按钮，即时切换接收模式（系统会记住您的选择，并在当前选中的模式后标有 ✅）。\n\n"
             "💡 示例链接：\n"
             "• `https://v.douyin.com/xxxx/`\n"
-            "• `https://www.tiktok.com/@user/video/xxxx`"
+            "• `https://www.tiktok.com/@user/video/xxxx`\n"
+            "• `https://x.com/user/status/xxxx`"
         )
         markup = get_user_keyboard_markup(message.chat.id)
         await bot.reply_to(message, welcome_text, reply_markup=markup, parse_mode="Markdown")
@@ -1372,12 +1430,12 @@ if bot:
         try:
             target_url = extract_http_url(text)
         except ValueError:
-            await bot.reply_to(message, "⚠️ 未在您的消息中检测到有效的链接，请发送正确的抖音或 TikTok 分享文本。")
+            await bot.reply_to(message, "⚠️ 未在您的消息中检测到有效的链接，请发送正确的抖音、TikTok 或 X (Twitter) 分享文本。")
             return
 
         # Simple verification of domains
-        if not any(domain in target_url for domain in ["douyin.com", "tiktok.com", "amemv.com"]):
-            await bot.reply_to(message, "⚠️ 该链接不属于支持的平台（抖音/TikTok），请检查后重新发送。")
+        if not any(domain in target_url for domain in ["douyin.com", "tiktok.com", "amemv.com", "x.com", "twitter.com"]):
+            await bot.reply_to(message, "⚠️ 该链接不属于支持的平台（抖音/TikTok/X），请检查后重新发送。")
             return
 
         status_msg = await bot.reply_to(message, "⏳ 正在解析链接，请稍候...")

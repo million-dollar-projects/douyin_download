@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Snaptok - 抖音/TikTok 无水印视频解析下载</title>
-    <meta name="description" content="极速、实时的 抖音 (Douyin) & TikTok 无水印视频在线解析下载工具，支持一键下载高清无水印视频。">
+    <title>Snaptok - 抖音/TikTok/X(Twitter) 视频解析下载</title>
+    <meta name="description" content="极速、实时的 抖音 (Douyin)、TikTok & X (Twitter) 视频在线解析下载工具，支持一键下载高清视频。">
     <!-- Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -368,6 +368,12 @@
             border-color: rgba(0, 242, 254, 0.2);
         }
 
+        .platform-x {
+            background: rgba(255, 255, 255, 0.1);
+            color: #ffffff;
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
         /* Action Buttons Grid */
         .actions-grid {
             display: grid;
@@ -596,7 +602,7 @@
         <!-- Header -->
         <header>
             <h1 class="logo">Snaptok</h1>
-            <p class="subtitle">抖音/TikTok 高清无水印视频在线解析下载工具，粘贴视频分享链接即可一键提取。</p>
+            <p class="subtitle">抖音/TikTok/X(Twitter) 高清视频在线解析下载工具，粘贴视频分享链接即可一键提取。</p>
         </header>
 
         <!-- Main Parser Form Card -->
@@ -606,7 +612,7 @@
                     <svg class="input-icon" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
                     </svg>
-                    <input type="text" id="video-url" class="url-input" placeholder="粘贴抖音/TikTok分享文本或视频链接..." required autocomplete="off">
+                    <input type="text" id="video-url" class="url-input" placeholder="粘贴抖音/TikTok/X(Twitter)分享文本或视频链接..." required autocomplete="off">
                 </div>
                 <button type="submit" id="submit-btn" class="submit-btn">
                     <span class="spinner" id="spinner"></span>
@@ -758,6 +764,8 @@
                 platformBadge.className = 'platform-badge'; // Reset classes
                 if (data.extractor.toLowerCase().includes('tiktok')) {
                     platformBadge.classList.add('platform-tiktok');
+                } else if (data.extractor.toLowerCase().includes('twitter') || data.extractor.toLowerCase().includes('x.com') || data.extractor.toLowerCase().includes('x')) {
+                    platformBadge.classList.add('platform-x');
                 } else {
                     platformBadge.classList.add('platform-douyin');
                 }
@@ -857,7 +865,7 @@
                             <span>|</span>
                             <span>${formatDuration(item.duration)}</span>
                             <span>|</span>
-                            <span style="text-transform:uppercase; font-weight:600; color: ${item.extractor.toLowerCase().includes('tiktok') ? '#ff0050' : '#00f2fe'}">${item.extractor}</span>
+                            <span style="text-transform:uppercase; font-weight:600; color: ${item.extractor.toLowerCase().includes('tiktok') ? '#ff0050' : (item.extractor.toLowerCase().includes('twitter') || item.extractor.toLowerCase().includes('x.com') || item.extractor.toLowerCase().includes('x') ? '#ffffff' : '#00f2fe')}">${item.extractor}</span>
                         </div>
                     </div>
                 `;
@@ -877,6 +885,8 @@
             platformBadge.className = 'platform-badge';
             if (item.extractor.toLowerCase().includes('tiktok')) {
                 platformBadge.classList.add('platform-tiktok');
+            } else if (item.extractor.toLowerCase().includes('twitter') || item.extractor.toLowerCase().includes('x.com') || item.extractor.toLowerCase().includes('x')) {
+                platformBadge.classList.add('platform-x');
             } else {
                 platformBadge.classList.add('platform-douyin');
             }
