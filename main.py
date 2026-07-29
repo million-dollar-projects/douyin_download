@@ -70,7 +70,7 @@ def sanitize_and_bridge_cookies(file_path: str):
 
             is_new_cookie = False
             first_word = line_stripped.split()[0] if line_stripped.split() else ""
-            if first_word.startswith(".") or "douyin.com" in first_word or "tiktok.com" in first_word:
+            if (first_word.startswith(".") or "." in first_word) and len(line_stripped.split()) >= 3:
                 is_new_cookie = True
 
             if is_new_cookie:
@@ -148,6 +148,8 @@ def clean_error_message(error_msg: str) -> str:
         return "解析失败：该平台（抖音/TikTok）目前强化了防爬虫限制，需要有效的 Cookie。请获取您浏览器的 Netscape 格式 Cookie 并保存到项目根目录下的 cookies.txt 文件中。"
     if "Unsupported URL" in cleaned:
         return "解析失败：暂不支持该链接，请确认输入的是抖音 (Douyin)、TikTok 或 X (Twitter) 的有效视频分享链接。"
+    if "No video could be found in this tweet" in cleaned:
+        return "解析失败：未在推文中检测到视频。如果该视频包含敏感或成人内容 (NSFW/年龄限制)，需要您导出已登录 X (Twitter) 账号的浏览器 Cookie (Netscape 格式) 并追加保存到项目根目录下的 cookies.txt 文件中以完成授权访问。"
     if "Your IP address is blocked" in cleaned or "HTTP Error 403" in cleaned:
         return "解析失败：服务器 IP 被平台暂时封禁/限制访问，请尝试配置代理或在 cookies.txt 中加入 Cookie 凭证。"
 
