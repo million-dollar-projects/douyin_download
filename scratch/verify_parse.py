@@ -6,10 +6,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from main import parse_video
 
-url = "https://x.com/TianjiOracle/status/2081162833081884717/video/1"
+url = "https://x.com/_GayFun_Car/status/2082206200960078110"
 
 try:
-    print(f"Calling parse_video with X URL: {url}...")
+    print(f"Calling parse_video with X NSFW URL: {url}...")
     res = parse_video(url)
     
     print("\n--- Parsing Result ---")

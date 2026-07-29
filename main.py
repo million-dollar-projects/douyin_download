@@ -750,8 +750,67 @@ def parse_video(url: str) -> dict:
                     'cookie_header': cookie_header
                 }
         except Exception as ytdlp_err:
-            logger.error(f"Twitter/X parsing failed: {str(ytdlp_err)}")
-            raise ytdlp_err
+            logger.warning(f"yt-dlp parsing failed for Twitter/X: {str(ytdlp_err)[:100]}. Trying FixTweet API fallback...")
+            try:
+                tweet_id_match = re.search(r'status/(\d+)', url)
+                if not tweet_id_match:
+                    raise ValueError("Could not extract tweet ID from URL")
+                
+                tweet_id = tweet_id_match.group(1)
+                api_url = f"https://api.fxtwitter.com/status/{tweet_id}"
+                
+                req = urllib.request.Request(
+                    api_url,
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                
+                if data.get('code') != 200 or 'tweet' not in data:
+                    raise ValueError(f"FixTweet API returned error: {data.get('message', 'Unknown error')}")
+                
+                tweet = data['tweet']
+                media = tweet.get('media', {})
+                videos = media.get('videos', [])
+                if not videos:
+                    videos = [m for m in media.get('all', []) if m.get('type') == 'video']
+                
+                if not videos:
+                    raise ValueError("No video found in FixTweet response")
+                
+                # Get the highest bitrate or just the main video
+                video = videos[0]
+                video_url = video.get('url')
+                
+                # Try to get highest quality from formats list if available
+                formats = video.get('formats', [])
+                mp4_formats = [f for f in formats if f.get('container') == 'mp4' and f.get('url')]
+                if mp4_formats:
+                    # Sort by bitrate desc if available
+                    mp4_formats.sort(key=lambda x: x.get('bitrate', 0), reverse=True)
+                    video_url = mp4_formats[0]['url']
+                
+                if not video_url:
+                    raise ValueError("Could not extract video download URL from FixTweet")
+                
+                metadata = {
+                    'id': tweet.get('id') or tweet_id,
+                    'title': tweet.get('text') or 'No Title',
+                    'description': tweet.get('text') or '',
+                    'thumbnail': video.get('thumbnail_url') or tweet.get('author', {}).get('avatar_url') or '',
+                    'uploader': tweet.get('author', {}).get('name') or tweet.get('author', {}).get('screen_name') or 'Unknown',
+                    'duration': float(video.get('duration') or 0),
+                    'raw_video_url': video_url,
+                    'extractor': 'Twitter / X'
+                }
+                
+                return {
+                    'metadata': metadata,
+                    'cookie_header': ''
+                }
+            except Exception as api_err:
+                logger.error(f"FixTweet API fallback failed: {str(api_err)}")
+                raise ValueError(f"Twitter/X 解析失败。yt-dlp 报错: {str(ytdlp_err)[:100]}; 敏感内容解析服务报错: {str(api_err)[:100]}")
 
     # Step 1: Try Mobile HTML Scraper (fastest, no cookies/signatures needed for public videos)
     try:
