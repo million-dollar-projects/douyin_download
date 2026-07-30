@@ -33,7 +33,10 @@ app = FastAPI(
 TG_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 COOKIES_CONTENT = os.getenv("COOKIES_CONTENT")
-TG_CHANNEL = os.getenv("TELEGRAM_CHANNEL", "@renzhiup")
+# Parse comma-separated list of channels from environment variable
+TELEGRAM_CHANNEL_RAW = os.getenv("TELEGRAM_CHANNEL", "@renzhiup")
+TG_CHANNELS = [c.strip() for c in TELEGRAM_CHANNEL_RAW.split(",") if c.strip()]
+TG_CHANNEL = TG_CHANNELS[0] if TG_CHANNELS else ""
 
 
 def clean_memory():
@@ -199,9 +202,33 @@ def save_user_prefs(prefs: dict):
         logger.error(f"Failed to save user preferences: {e}")
 
 def get_user_mode(chat_id: int) -> str:
-    """Returns 'channel' if target is channel, or 'direct' if target is the user's private chat."""
+    """Returns the preference mode ('direct' or 'channel:<channel_name>'). Supports fallbacks and legacy formats."""
     prefs = load_user_prefs()
-    return prefs.get(str(chat_id), "channel" if TG_CHANNEL else "direct")
+    mode = prefs.get(str(chat_id))
+    
+    if not mode:
+        if TG_CHANNELS:
+            return f"channel:{TG_CHANNELS[0]}"
+        else:
+            return "direct"
+            
+    # Legacy compatibility mapping
+    if mode == "channel":
+        if TG_CHANNELS:
+            return f"channel:{TG_CHANNELS[0]}"
+        else:
+            return "direct"
+            
+    if mode.startswith("channel:"):
+        target_channel = mode.split(":", 1)[1]
+        if target_channel not in TG_CHANNELS:
+            # Config changed, channel is no longer active. Fallback.
+            if TG_CHANNELS:
+                return f"channel:{TG_CHANNELS[0]}"
+            else:
+                return "direct"
+                
+    return mode
 
 def set_user_mode(chat_id: int, mode: str):
     """Sets user mode preference and saves to file."""
@@ -210,9 +237,9 @@ def set_user_mode(chat_id: int, mode: str):
     save_user_prefs(prefs)
 
 def get_user_keyboard_markup(chat_id: int) -> types.ReplyKeyboardMarkup:
-    """Generates bottom reply keyboard with direct vs channel selection buttons."""
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    if not TG_CHANNEL:
+    """Generates bottom reply keyboard with direct vs specific channel selection buttons."""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    if not TG_CHANNELS:
         # If no channel is configured, just show a simple helper button
         btn = types.KeyboardButton("📥 直接返回给您 ✅")
         markup.add(btn)
@@ -220,8 +247,14 @@ def get_user_keyboard_markup(chat_id: int) -> types.ReplyKeyboardMarkup:
 
     current_mode = get_user_mode(chat_id)
     btn_direct = types.KeyboardButton("📥 直接返回给您" + (" ✅" if current_mode == "direct" else ""))
-    btn_channel = types.KeyboardButton("📤 发送到频道" + (" ✅" if current_mode == "channel" else ""))
-    markup.add(btn_direct, btn_channel)
+    markup.add(btn_direct)
+
+    # Add a button for each channel
+    for channel in TG_CHANNELS:
+        is_selected = (current_mode == f"channel:{channel}")
+        btn_channel = types.KeyboardButton(f"📤 发送至 {channel}" + (" ✅" if is_selected else ""))
+        markup.add(btn_channel)
+
     return markup
 
 
@@ -1285,7 +1318,13 @@ if bot:
     @bot.message_handler(commands=['settings'])
     async def show_settings(message):
         current_mode = get_user_mode(message.chat.id)
-        mode_text = "📤 **发送到频道**" if current_mode == "channel" else "📥 **直接返回给您**"
+        if current_mode == "direct":
+            mode_text = "📥 **直接返回给您**"
+        elif current_mode.startswith("channel:"):
+            target_channel = current_mode.split(":", 1)[1]
+            mode_text = f"📤 **发送至频道 {target_channel}**"
+        else:
+            mode_text = "📥 **直接返回给您**"
         
         welcome_text = (
             f"⚙️ **机器人接收设置**\n\n"
@@ -1295,7 +1334,7 @@ if bot:
         markup = get_user_keyboard_markup(message.chat.id)
         await bot.reply_to(message, welcome_text, reply_markup=markup, parse_mode="Markdown")
 
-    @bot.message_handler(func=lambda message: message.text and ("直接返回给您" in message.text or "发送到频道" in message.text))
+    @bot.message_handler(func=lambda message: message.text and ("直接返回给您" in message.text or "发送到频道" in message.text or "发送至" in message.text))
     async def handle_settings_toggle(message):
         chat_id = message.chat.id
         text = message.text
@@ -1304,11 +1343,31 @@ if bot:
             set_user_mode(chat_id, "direct")
             reply_text = "✨ 设置已更新！解析后的视频将**直接在聊天中发送给您**。"
         elif "发送到频道" in text:
-            if not TG_CHANNEL:
-                await bot.reply_to(message, "⚠️ 未配置默认频道，无法切换到该模式。")
+            if not TG_CHANNELS:
+                await bot.reply_to(message, "⚠️ 未配置目标频道，无法切换到该模式。")
                 return
-            set_user_mode(chat_id, "channel")
-            reply_text = f"✨ 设置已更新！解析后的视频将**同步发送至频道 {TG_CHANNEL}**。"
+            set_user_mode(chat_id, f"channel:{TG_CHANNELS[0]}")
+            reply_text = f"✨ 设置已更新！解析后的视频将**同步发送至频道 {TG_CHANNELS[0]}**。"
+        elif "发送至" in text:
+            try:
+                # Extract channel name: remove emoji, "发送至" and "✅"
+                clean_text = text.replace("📤", "").strip()
+                parts = clean_text.split("发送至")
+                if len(parts) < 2:
+                    raise ValueError("Invalid button text format")
+                channel_part = parts[1].strip()
+                channel = channel_part.replace("✅", "").strip()
+                
+                if channel not in TG_CHANNELS:
+                    await bot.reply_to(message, f"⚠️ 频道 {channel} 不是可用的配置频道，请重新选择。")
+                    return
+                    
+                set_user_mode(chat_id, f"channel:{channel}")
+                reply_text = f"✨ 设置已更新！解析后的视频将**同步发送至频道 {channel}**。"
+            except Exception as e:
+                logger.error(f"Failed to parse channel from text '{text}': {e}")
+                await bot.reply_to(message, "⚠️ 无法解析选中的频道，请重新选择。")
+                return
         else:
             return
 
@@ -1331,8 +1390,12 @@ if bot:
 
             # Determine target for video based on user preferences and configuration
             user_mode = get_user_mode(chat_id)
-            is_uploading_to_channel = bool(TG_CHANNEL and user_mode == "channel")
-            target_chat = TG_CHANNEL if is_uploading_to_channel else chat_id
+            is_uploading_to_channel = user_mode.startswith("channel:")
+            if is_uploading_to_channel:
+                target_channel = user_mode.split(":", 1)[1]
+            else:
+                target_channel = chat_id
+            target_chat = target_channel
 
             # Start downloading video stream
             req_referer = target_url
@@ -1396,7 +1459,7 @@ if bot:
 
                 # Send final confirmation message to user if synced to channel
                 if is_uploading_to_channel:
-                    await bot.send_message(chat_id=chat_id, text=f"🎉 视频解析成功，已发送至频道 {TG_CHANNEL}！")
+                    await bot.send_message(chat_id=chat_id, text=f"🎉 视频解析成功，已发送至频道 {target_channel}！")
 
             except Exception as dl_upload_err:
                 logger.warning(f"Failed to post video directly: {str(dl_upload_err)}")
@@ -1435,22 +1498,22 @@ if bot:
                     try:
                         # Try to post the link fallback message to the channel
                         await bot.send_message(
-                            chat_id=TG_CHANNEL,
+                            chat_id=target_channel,
                             text=fallback_text,
                             reply_markup=markup,
                             parse_mode="Markdown"
                         )
                         await bot.edit_message_text(
-                            text=f"🎉 视频解析成功！但因文件过大或权限受限未能直接上传视频，已将下载链接同步发布到频道 {TG_CHANNEL}。\n\n*(错误详情: {escaped_err})*",
+                            text=f"🎉 视频解析成功！但因文件过大或权限受限未能直接上传视频，已将下载链接同步发布到频道 {target_channel}。\n\n*(错误详情: {escaped_err})*",
                             chat_id=chat_id,
                             message_id=status_msg.message_id,
                             reply_markup=markup,
                             parse_mode="Markdown"
                         )
                     except Exception as chan_err:
-                        logger.error(f"Failed to send fallback message to channel: {str(chan_err)}")
+                        logger.error(f"Failed to send fallback message to channel {target_channel}: {str(chan_err)}")
                         await bot.edit_message_text(
-                            text=fallback_text + f"\n\n*(发送至频道失败，请确保机器人已成为频道 {TG_CHANNEL} 的管理员。)*",
+                            text=fallback_text + f"\n\n*(发送至频道失败，请确保机器人已成为频道 {target_channel} 的管理员。)*",
                             chat_id=chat_id,
                             message_id=status_msg.message_id,
                             reply_markup=markup,
