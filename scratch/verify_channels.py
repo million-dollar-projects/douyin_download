@@ -28,39 +28,40 @@ class TestMultiChannelSupport(unittest.TestCase):
         self.assertEqual(main.TG_CHANNEL, "@renzhiup")
         print("✅ TG_CHANNELS parsed correctly:", main.TG_CHANNELS)
 
-    def test_get_user_mode(self):
-        print("Testing get_user_mode...")
+    def test_get_user_mode_with_private_channels(self):
+        print("Testing get_user_mode with public and private channels...")
         chat_id = 123456
         
-        # Test 1: Empty preference (defaults to channel:first_channel)
+        # Test 1: Empty preference (defaults to channel:first_public_channel)
         mode = main.get_user_mode(chat_id)
         self.assertEqual(mode, "channel:@renzhiup")
         
-        # Test 2: Legacy "channel" mode (should fallback to channel:first_channel)
-        main.set_user_mode(chat_id, "channel")
+        # Test 2: Add private channel
+        added = main.add_user_private_channel(chat_id, "@my_private")
+        self.assertTrue(added)
+        
+        # Verify private channel list
+        privates = main.get_user_private_channels(chat_id)
+        self.assertEqual(privates, ["@my_private"])
+        
+        # Test 3: Specific private channel selection
+        main.set_user_mode(chat_id, "channel:@my_private")
+        mode = main.get_user_mode(chat_id)
+        self.assertEqual(mode, "channel:@my_private")
+        
+        # Test 4: Obsolete private channel fallback (if removed, goes to first available channel which is public @renzhiup)
+        main.remove_user_private_channel(chat_id, "@my_private")
         mode = main.get_user_mode(chat_id)
         self.assertEqual(mode, "channel:@renzhiup")
         
-        # Test 3: Specific channel mode
-        main.set_user_mode(chat_id, "channel:@anotherchannel")
-        mode = main.get_user_mode(chat_id)
-        self.assertEqual(mode, "channel:@anotherchannel")
-        
-        # Test 4: Direct mode
-        main.set_user_mode(chat_id, "direct")
-        mode = main.get_user_mode(chat_id)
-        self.assertEqual(mode, "direct")
-        
-        # Test 5: Invalid/Obsolete channel (fallback to channel:first_channel)
-        main.set_user_mode(chat_id, "channel:@obsolete")
-        mode = main.get_user_mode(chat_id)
-        self.assertEqual(mode, "channel:@renzhiup")
-        
-        print("✅ get_user_mode / set_user_mode verified successfully!")
+        print("✅ get_user_mode / set_user_mode with private channels verified successfully!")
 
-    def test_get_user_keyboard_markup(self):
-        print("Testing get_user_keyboard_markup...")
+    def test_get_user_keyboard_markup_with_private_channels(self):
+        print("Testing get_user_keyboard_markup with private channels...")
         chat_id = 987654
+        
+        # Add private channel
+        main.add_user_private_channel(chat_id, "@my_private")
         
         # Setup mode to direct
         main.set_user_mode(chat_id, "direct")
@@ -69,16 +70,18 @@ class TestMultiChannelSupport(unittest.TestCase):
         self.assertIn("📥 直接返回给您 ✅", buttons)
         self.assertIn("📤 发送至 @renzhiup", buttons)
         self.assertIn("📤 发送至 @anotherchannel", buttons)
+        self.assertIn("📤 发送至 @my_private", buttons)
         
-        # Setup mode to channel:@anotherchannel
-        main.set_user_mode(chat_id, "channel:@anotherchannel")
+        # Setup mode to channel:@my_private
+        main.set_user_mode(chat_id, "channel:@my_private")
         markup = main.get_user_keyboard_markup(chat_id)
         buttons = [b.get('text') if isinstance(b, dict) else b.text for row in markup.keyboard for b in row]
         self.assertIn("📥 直接返回给您", buttons)
         self.assertIn("📤 发送至 @renzhiup", buttons)
-        self.assertIn("📤 发送至 @anotherchannel ✅", buttons)
+        self.assertIn("📤 发送至 @anotherchannel", buttons)
+        self.assertIn("📤 发送至 @my_private ✅", buttons)
         
-        print("✅ get_user_keyboard_markup verified successfully!")
+        print("✅ get_user_keyboard_markup with private channels verified successfully!")
 
 if __name__ == "__main__":
     unittest.main()

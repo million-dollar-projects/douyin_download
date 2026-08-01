@@ -201,30 +201,81 @@ def save_user_prefs(prefs: dict):
     except Exception as e:
         logger.error(f"Failed to save user preferences: {e}")
 
-def get_user_mode(chat_id: int) -> str:
-    """Returns the preference mode ('direct' or 'channel:<channel_name>'). Supports fallbacks and legacy formats."""
+def get_user_data(chat_id: int) -> dict:
+    """Retrieves user preference dictionary from file. Supports backward-compatibility for string values."""
     prefs = load_user_prefs()
-    mode = prefs.get(str(chat_id))
+    data = prefs.get(str(chat_id), {})
+    if isinstance(data, str):
+        # Convert legacy string (mode) to structured dict
+        data = {
+            "mode": data,
+            "private_channels": []
+        }
+    return data
+
+def get_user_private_channels(chat_id: int) -> list:
+    """Returns the list of private channels configured by the user."""
+    data = get_user_data(chat_id)
+    return data.get("private_channels", [])
+
+def add_user_private_channel(chat_id: int, channel: str) -> bool:
+    """Binds a new private channel for the user. Returns True if successful, False if duplicate."""
+    prefs = load_user_prefs()
+    data = prefs.get(str(chat_id), {})
+    if isinstance(data, str):
+        data = {"mode": data, "private_channels": []}
+    
+    private_channels = data.setdefault("private_channels", [])
+    if channel not in private_channels:
+        private_channels.append(channel)
+        prefs[str(chat_id)] = data
+        save_user_prefs(prefs)
+        return True
+    return False
+
+def remove_user_private_channel(chat_id: int, channel: str) -> bool:
+    """Unbinds a private channel for the user. Returns True if successful, False if not found."""
+    prefs = load_user_prefs()
+    data = prefs.get(str(chat_id), {})
+    if isinstance(data, str):
+        data = {"mode": data, "private_channels": []}
+    
+    private_channels = data.get("private_channels", [])
+    if channel in private_channels:
+        private_channels.remove(channel)
+        prefs[str(chat_id)] = data
+        save_user_prefs(prefs)
+        return True
+    return False
+
+def get_user_mode(chat_id: int) -> str:
+    """Returns the preference mode ('direct' or 'channel:<channel_name>'). Supports fallback to public/private channels."""
+    data = get_user_data(chat_id)
+    mode = data.get("mode")
+    
+    # Combined public + user private channels
+    user_private_channels = data.get("private_channels", [])
+    all_channels = TG_CHANNELS + user_private_channels
     
     if not mode:
-        if TG_CHANNELS:
-            return f"channel:{TG_CHANNELS[0]}"
+        if all_channels:
+            return f"channel:{all_channels[0]}"
         else:
             return "direct"
             
     # Legacy compatibility mapping
     if mode == "channel":
-        if TG_CHANNELS:
-            return f"channel:{TG_CHANNELS[0]}"
+        if all_channels:
+            return f"channel:{all_channels[0]}"
         else:
             return "direct"
             
     if mode.startswith("channel:"):
         target_channel = mode.split(":", 1)[1]
-        if target_channel not in TG_CHANNELS:
-            # Config changed, channel is no longer active. Fallback.
-            if TG_CHANNELS:
-                return f"channel:{TG_CHANNELS[0]}"
+        if target_channel not in all_channels:
+            # Fallback to first available channel, otherwise direct
+            if all_channels:
+                return f"channel:{all_channels[0]}"
             else:
                 return "direct"
                 
@@ -233,14 +284,22 @@ def get_user_mode(chat_id: int) -> str:
 def set_user_mode(chat_id: int, mode: str):
     """Sets user mode preference and saves to file."""
     prefs = load_user_prefs()
-    prefs[str(chat_id)] = mode
+    data = prefs.get(str(chat_id), {})
+    if isinstance(data, str):
+        data = {"mode": data, "private_channels": []}
+    data["mode"] = mode
+    prefs[str(chat_id)] = data
     save_user_prefs(prefs)
 
 def get_user_keyboard_markup(chat_id: int) -> types.ReplyKeyboardMarkup:
-    """Generates bottom reply keyboard with direct vs specific channel selection buttons."""
+    """Generates bottom reply keyboard dynamically merging public and user-configured private channels."""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
-    if not TG_CHANNELS:
-        # If no channel is configured, just show a simple helper button
+    
+    user_private_channels = get_user_private_channels(chat_id)
+    all_channels = TG_CHANNELS + user_private_channels
+    
+    if not all_channels:
+        # If no channel is configured at all, show simple helper button
         btn = types.KeyboardButton("📥 直接返回给您 ✅")
         markup.add(btn)
         return markup
@@ -249,8 +308,8 @@ def get_user_keyboard_markup(chat_id: int) -> types.ReplyKeyboardMarkup:
     btn_direct = types.KeyboardButton("📥 直接返回给您" + (" ✅" if current_mode == "direct" else ""))
     markup.add(btn_direct)
 
-    # Add a button for each channel
-    for channel in TG_CHANNELS:
+    # Add a button for each channel (public + private)
+    for channel in all_channels:
         is_selected = (current_mode == f"channel:{channel}")
         btn_channel = types.KeyboardButton(f"📤 发送至 {channel}" + (" ✅" if is_selected else ""))
         markup.add(btn_channel)
@@ -1326,10 +1385,23 @@ if bot:
         else:
             mode_text = "📥 **直接返回给您**"
         
+        private_channels = get_user_private_channels(message.chat.id)
+        private_text = "\n".join([f"• `{c}`" for c in private_channels]) if private_channels else "*(无)*"
+        
         welcome_text = (
             f"⚙️ **机器人接收设置**\n\n"
-            f"当前模式：{mode_text}\n\n"
-            f"您可以通过轻点下方的底部键盘按钮来直接切换模式。"
+            f"当前投递模式：{mode_text}\n\n"
+            f"🌐 **系统公共频道**：\n"
+            f"{' • ' + ', '.join(TG_CHANNELS) if TG_CHANNELS else '*(无)*'}\n\n"
+            f"🔒 **您的私有频道**：\n{private_text}\n\n"
+            f"💡 **私有频道绑定命令**：\n"
+            f"你可以向机器人发送以下指令来自主管理：\n"
+            f"1. `/addchannel <频道用户名或ID>` 来绑定私有频道\n"
+            f"   *(例如：`/addchannel @my_private_channel`)*\n"
+            f"2. `/delchannel <频道用户名或ID>` 来解除绑定\n"
+            f"   *(例如：`/delchannel @my_private_channel`)*\n\n"
+            f"*(注意：绑定的私有频道必须将机器人设为管理员并赋予发布消息权限。)*\n\n"
+            f"您可以通过轻点下方的底部键盘按钮来切换接收模式。"
         )
         markup = get_user_keyboard_markup(message.chat.id)
         await bot.reply_to(message, welcome_text, reply_markup=markup, parse_mode="Markdown")
@@ -1339,15 +1411,18 @@ if bot:
         chat_id = message.chat.id
         text = message.text
 
+        user_private_channels = get_user_private_channels(chat_id)
+        all_channels = TG_CHANNELS + user_private_channels
+
         if "直接返回给您" in text:
             set_user_mode(chat_id, "direct")
             reply_text = "✨ 设置已更新！解析后的视频将**直接在聊天中发送给您**。"
         elif "发送到频道" in text:
-            if not TG_CHANNELS:
-                await bot.reply_to(message, "⚠️ 未配置目标频道，无法切换到该模式。")
+            if not all_channels:
+                await bot.reply_to(message, "⚠️ 未配置任何目标频道，无法切换到该模式。")
                 return
-            set_user_mode(chat_id, f"channel:{TG_CHANNELS[0]}")
-            reply_text = f"✨ 设置已更新！解析后的视频将**同步发送至频道 {TG_CHANNELS[0]}**。"
+            set_user_mode(chat_id, f"channel:{all_channels[0]}")
+            reply_text = f"✨ 设置已更新！解析后的视频将**同步发送至频道 {all_channels[0]}**。"
         elif "发送至" in text:
             try:
                 # Extract channel name: remove emoji, "发送至" and "✅"
@@ -1358,7 +1433,7 @@ if bot:
                 channel_part = parts[1].strip()
                 channel = channel_part.replace("✅", "").strip()
                 
-                if channel not in TG_CHANNELS:
+                if channel not in all_channels:
                     await bot.reply_to(message, f"⚠️ 频道 {channel} 不是可用的配置频道，请重新选择。")
                     return
                     
@@ -1373,6 +1448,67 @@ if bot:
 
         markup = get_user_keyboard_markup(chat_id)
         await bot.reply_to(message, reply_text, reply_markup=markup, parse_mode="Markdown")
+
+    @bot.message_handler(commands=['addchannel'])
+    async def handle_add_channel(message):
+        chat_id = message.chat.id
+        text = message.text.strip()
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await bot.reply_to(message, "⚠️ 使用格式不正确，请输入：`/addchannel <频道用户名或ID>`", parse_mode="Markdown")
+            return
+            
+        new_channel = parts[1].strip()
+        
+        # Validation: must start with @ or be a negative integer
+        is_valid = False
+        if new_channel.startswith("@"):
+            is_valid = True
+        else:
+            try:
+                val = int(new_channel)
+                if val < 0:
+                    is_valid = True
+            except ValueError:
+                pass
+                
+        if not is_valid:
+            await bot.reply_to(message, "⚠️ 频道格式无效。必须以 `@` 开头（如 `@my_channel`）或者是负数频道 ID（如 `-100123456789`）。")
+            return
+            
+        if new_channel in TG_CHANNELS:
+            await bot.reply_to(message, "⚠️ 该频道已经是系统公共频道，无需重复添加。")
+            return
+            
+        added = add_user_private_channel(chat_id, new_channel)
+        if added:
+            # Refresh keyboard
+            markup = get_user_keyboard_markup(chat_id)
+            await bot.reply_to(message, f"✅ 已成功绑定私有频道：`{new_channel}`！\n您现在可以在下方键盘选择该频道进行投递了。", reply_markup=markup, parse_mode="Markdown")
+        else:
+            await bot.reply_to(message, "⚠️ 该频道已在您的私有频道列表中。")
+
+    @bot.message_handler(commands=['delchannel'])
+    async def handle_del_channel(message):
+        chat_id = message.chat.id
+        text = message.text.strip()
+        parts = text.split(maxsplit=1)
+        if len(parts) < 2:
+            await bot.reply_to(message, "⚠️ 使用格式不正确，请输入：`/delchannel <频道用户名或ID>`", parse_mode="Markdown")
+            return
+            
+        channel_to_del = parts[1].strip()
+        removed = remove_user_private_channel(chat_id, channel_to_del)
+        if removed:
+            # If the user was currently in this mode, reset to direct
+            current_mode = get_user_mode(chat_id)
+            if current_mode == f"channel:{channel_to_del}":
+                set_user_mode(chat_id, "direct")
+                
+            markup = get_user_keyboard_markup(chat_id)
+            await bot.reply_to(message, f"✅ 已成功解绑私有频道：`{channel_to_del}`！", reply_markup=markup, parse_mode="Markdown")
+        else:
+            await bot.reply_to(message, "⚠️ 您的私有频道列表中未找到该频道。")
 
     async def process_video_download_and_upload(chat_id: int, target_url: str, status_msg, is_retry: bool = False):
         try:
