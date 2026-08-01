@@ -292,8 +292,8 @@ def set_user_mode(chat_id: int, mode: str):
     save_user_prefs(prefs)
 
 def get_user_keyboard_markup(chat_id: int) -> types.ReplyKeyboardMarkup:
-    """Generates bottom reply keyboard dynamically merging public and user-configured private channels."""
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=1)
+    """Generates bottom reply keyboard dynamically merging public and user-configured private channels in a 3-column layout."""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=3)
     
     user_private_channels = get_user_private_channels(chat_id)
     all_channels = TG_CHANNELS + user_private_channels
@@ -305,15 +305,18 @@ def get_user_keyboard_markup(chat_id: int) -> types.ReplyKeyboardMarkup:
         return markup
 
     current_mode = get_user_mode(chat_id)
+    buttons = []
+    
     btn_direct = types.KeyboardButton("📥 直接返回给您" + (" ✅" if current_mode == "direct" else ""))
-    markup.add(btn_direct)
+    buttons.append(btn_direct)
 
     # Add a button for each channel (public + private)
     for channel in all_channels:
         is_selected = (current_mode == f"channel:{channel}")
         btn_channel = types.KeyboardButton(f"📤 发送至 {channel}" + (" ✅" if is_selected else ""))
-        markup.add(btn_channel)
+        buttons.append(btn_channel)
 
+    markup.add(*buttons)
     return markup
 
 

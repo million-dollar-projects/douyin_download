@@ -72,6 +72,12 @@ class TestMultiChannelSupport(unittest.TestCase):
         self.assertIn("📤 发送至 @anotherchannel", buttons)
         self.assertIn("📤 发送至 @my_private", buttons)
         
+        # Assert layout structure (should be 3 columns maximum per row)
+        # We have 4 buttons total (1 direct, 2 public, 1 private) -> should result in 2 rows (3 buttons in row 1, 1 button in row 2)
+        self.assertEqual(len(markup.keyboard), 2)
+        self.assertEqual(len(markup.keyboard[0]), 3)
+        self.assertEqual(len(markup.keyboard[1]), 1)
+        
         # Setup mode to channel:@my_private
         main.set_user_mode(chat_id, "channel:@my_private")
         markup = main.get_user_keyboard_markup(chat_id)
