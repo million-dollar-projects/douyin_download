@@ -38,6 +38,10 @@ TELEGRAM_CHANNEL_RAW = os.getenv("TELEGRAM_CHANNEL", "@renzhiup")
 TG_CHANNELS = [c.strip() for c in TELEGRAM_CHANNEL_RAW.split(",") if c.strip()]
 TG_CHANNEL = TG_CHANNELS[0] if TG_CHANNELS else ""
 
+# Upstash Redis REST Configuration
+UPSTASH_REDIS_REST_URL = os.getenv("UPSTASH_REDIS_REST_URL")
+UPSTASH_REDIS_REST_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+
 
 def clean_memory():
     """Forces Python garbage collection and trims memory allocator memory on Linux (Render)."""
@@ -183,7 +187,28 @@ if COOKIES_CONTENT:
 USER_PREFS_FILE = "user_preferences.json"
 
 def load_user_prefs() -> dict:
-    """Loads user preferences from user_preferences.json file."""
+    """Loads user preferences from Upstash Redis or local user_preferences.json file."""
+    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        try:
+            req = urllib.request.Request(
+                UPSTASH_REDIS_REST_URL,
+                data=json.dumps(["GET", "user_preferences"]).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}",
+                    "Content-Type": "application/json"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                result_data = json.loads(resp.read().decode("utf-8"))
+                val = result_data.get("result")
+                if val:
+                    return json.loads(val)
+                return {}
+        except Exception as e:
+            logger.error(f"Failed to load user preferences from Upstash Redis: {e}")
+            return {}
+
     if os.path.exists(USER_PREFS_FILE):
         try:
             with open(USER_PREFS_FILE, "r", encoding="utf-8") as f:
@@ -194,7 +219,30 @@ def load_user_prefs() -> dict:
     return {}
 
 def save_user_prefs(prefs: dict):
-    """Saves user preferences to user_preferences.json file."""
+    """Saves user preferences to Upstash Redis or local user_preferences.json file."""
+    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        try:
+            val_str = json.dumps(prefs, ensure_ascii=False)
+            req = urllib.request.Request(
+                UPSTASH_REDIS_REST_URL,
+                data=json.dumps(["SET", "user_preferences", val_str]).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}",
+                    "Content-Type": "application/json"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                result_data = json.loads(resp.read().decode("utf-8"))
+                if result_data.get("result") == "OK":
+                    logger.info("Successfully saved user preferences to Upstash Redis")
+                else:
+                    logger.error(f"Failed to save user preferences to Upstash Redis: {result_data}")
+            return
+        except Exception as e:
+            logger.error(f"Failed to save user preferences to Upstash Redis: {e}")
+            return
+
     try:
         with open(USER_PREFS_FILE, "w", encoding="utf-8") as f:
             json.dump(prefs, f, ensure_ascii=False, indent=2)
