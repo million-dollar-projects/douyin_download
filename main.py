@@ -628,16 +628,10 @@ def parse_video_douyin_abogus(url: str) -> dict:
 
     ua = ABogus.DEFAULT_USER_AGENT
     
-    # Step 1: Follow redirects to obtain canonical URL & guest ttwid cookie
-    ttwid = None
+    # Step 1: Follow redirects to obtain canonical URL
     with httpx.Client(headers={'User-Agent': ua}, follow_redirects=True, timeout=12) as client:
         resp = client.get(url)
         final_url = str(resp.url)
-        
-        for c in client.cookies.jar:
-            if c.name == 'ttwid':
-                ttwid = c.value
-                break
         
         # Step 2: Extract aweme_id from final_url or page response
         video_id_match = re.search(r'video/(\d+)', final_url)
@@ -652,58 +646,99 @@ def parse_video_douyin_abogus(url: str) -> dict:
         if not video_id:
             raise ValueError(f"Could not extract Douyin video ID from URL: {final_url}")
 
-        # Step 3: Build Web API query parameters and calculate a_bogus signature
-        params_dict = {
-            'device_platform': 'webapp',
-            'aid': '6383',
-            'channel': 'channel_pc_web',
-            'aweme_id': video_id,
-            'update_version_code': '170400',
-            'pc_client_type': '1',
-            'pc_libra_divert': 'Windows',
-            'version_code': '190500',
-            'version_name': '19.5.0',
-            'cookie_enabled': 'true',
-            'screen_width': '1920',
-            'screen_height': '1080',
-            'browser_language': 'zh-CN',
-            'browser_platform': 'Win32',
-            'browser_name': 'Edge',
-            'browser_version': '131.0.0.0',
-            'browser_online': 'true',
-            'engine_name': 'Blink',
-            'engine_version': '131.0.0.0',
-            'os_name': 'Windows',
-            'os_version': '10',
-            'cpu_core_num': '12',
-            'device_memory': '8',
-            'platform': 'PC',
-            'downlink': '10',
-            'effective_type': '4g',
-            'round_trip_time': '50'
-        }
+    # Step 3: Extract fresh ttwid from iesdouyin share page
+    ttwid = None
+    share_url = f"https://www.iesdouyin.com/share/video/{video_id}/"
+    try:
+        with httpx.Client(headers={'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'}, timeout=10) as client:
+            r_share = client.get(share_url)
+            ttwid = r_share.cookies.get('ttwid')
+            if not ttwid:
+                for header_val in r_share.headers.get_list('set-cookie'):
+                    m = re.search(r'ttwid=([^;]+)', header_val)
+                    if m:
+                        ttwid = m.group(1)
+                        break
+    except Exception as ttwid_err:
+        logger.warning(f"Could not fetch ttwid from iesdouyin share page: {ttwid_err}")
 
-        params_str = urllib.parse.urlencode(params_dict)
-        signer = ABogus(user_agent=ua)
-        signed_params, a_bogus_token, _, _ = signer.generate_abogus(params=params_str)
+    # Step 4: Combine ttwid and any local cookies (cookies.txt)
+    cookie_parts = []
+    if ttwid:
+        cookie_parts.append(f"ttwid={ttwid}")
 
-        api_url = f"https://www.douyin.com/aweme/v1/web/aweme/detail/?{signed_params}"
-        headers = {
-            'User-Agent': ua,
-            'Referer': f'https://www.douyin.com/video/{video_id}',
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Sec-Ch-Ua': '"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"Windows"',
-            'Cookie': f'ttwid={ttwid}' if ttwid else ''
-        }
+    cookies_path = 'cookies.txt'
+    if os.path.exists(cookies_path) and os.path.getsize(cookies_path) > 0:
+        try:
+            with open(cookies_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('#') or not line.strip():
+                        continue
+                    p = line.strip().split('\t')
+                    if len(p) >= 7 and 'douyin' in p[0]:
+                        cookie_parts.append(f"{p[5]}={p[6]}")
+        except Exception:
+            pass
 
+    cookie_header_str = '; '.join(cookie_parts)
+
+    # Step 5: Build Web API query parameters and calculate a_bogus signature
+    params_dict = {
+        'device_platform': 'webapp',
+        'aid': '6383',
+        'channel': 'channel_pc_web',
+        'aweme_id': video_id,
+        'update_version_code': '170400',
+        'pc_client_type': '1',
+        'pc_libra_divert': 'Windows',
+        'version_code': '190500',
+        'version_name': '19.5.0',
+        'cookie_enabled': 'true',
+        'screen_width': '1920',
+        'screen_height': '1080',
+        'browser_language': 'zh-CN',
+        'browser_platform': 'Win32',
+        'browser_name': 'Edge',
+        'browser_version': '131.0.0.0',
+        'browser_online': 'true',
+        'engine_name': 'Blink',
+        'engine_version': '131.0.0.0',
+        'os_name': 'Windows',
+        'os_version': '10',
+        'cpu_core_num': '12',
+        'device_memory': '8',
+        'platform': 'PC',
+        'downlink': '10',
+        'effective_type': '4g',
+        'round_trip_time': '50'
+    }
+
+    params_str = urllib.parse.urlencode(params_dict)
+    signer = ABogus(user_agent=ua)
+    signed_params, a_bogus_token, _, _ = signer.generate_abogus(params=params_str)
+
+    api_url = f"https://www.douyin.com/aweme/v1/web/aweme/detail/?{signed_params}"
+    headers = {
+        'User-Agent': ua,
+        'Referer': f'https://www.douyin.com/video/{video_id}',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        'Sec-Ch-Ua': '"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Cookie': cookie_header_str
+    }
+
+    with httpx.Client(timeout=12) as client:
         api_resp = client.get(api_url, headers=headers)
-        if not api_resp.text:
-            raise ValueError("Empty response returned from Douyin Web Detail API")
+        if not api_resp.text or not api_resp.text.strip():
+            raise ValueError(f"Empty response returned from Douyin Web Detail API (HTTP {api_resp.status_code})")
 
-        data = api_resp.json()
+        try:
+            data = api_resp.json()
+        except Exception:
+            raise ValueError(f"Invalid JSON returned from Douyin API (HTTP {api_resp.status_code}): {api_resp.text[:80]}")
+
         detail = data.get('aweme_detail')
         if not detail:
             status_msg = data.get('status_msg') or 'No aweme_detail object in JSON'
