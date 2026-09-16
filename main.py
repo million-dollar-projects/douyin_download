@@ -19,6 +19,12 @@ from telebot.async_telebot import AsyncTeleBot
 from telebot import types
 from abogus import ABogus, generate_a_bogus
 
+try:
+    from curl_cffi import requests as cffi_requests
+    HAS_CURL_CFFI = True
+except ImportError:
+    HAS_CURL_CFFI = False
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)  # Mute verbose httpx logs
@@ -623,42 +629,62 @@ def parse_video_pearktrue(url: str) -> dict:
 
 
 def parse_video_douyin_abogus(url: str) -> dict:
-    """Primary parser that extracts 1080P/4K no-watermark video directly from Douyin Web Detail API using a_bogus signature."""
+    """Primary parser that extracts 1080P/4K no-watermark video directly from Douyin Web Detail API using a_bogus signature and Chrome TLS impersonation."""
     logger.info(f"Using a_bogus Web API parser for URL: {url}")
 
     ua = ABogus.DEFAULT_USER_AGENT
+    mobile_ua = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
     
     # Step 1: Follow redirects to obtain canonical URL
-    with httpx.Client(headers={'User-Agent': ua}, follow_redirects=True, timeout=12) as client:
-        resp = client.get(url)
+    if HAS_CURL_CFFI:
+        s = cffi_requests.Session(impersonate="chrome131")
+        resp = s.get(url, headers={'User-Agent': ua}, allow_redirects=True, timeout=12)
         final_url = str(resp.url)
+        resp_text = resp.text
+    else:
+        with httpx.Client(headers={'User-Agent': ua}, follow_redirects=True, timeout=12) as client:
+            resp = client.get(url)
+            final_url = str(resp.url)
+            resp_text = resp.text
         
-        # Step 2: Extract aweme_id from final_url or page response
-        video_id_match = re.search(r'video/(\d+)', final_url)
-        if not video_id_match:
-            video_id_match = re.search(r'note/(\d+)', final_url)
-        if not video_id_match:
-            video_id_match = re.search(r'video/(\d+)', resp.text)
-        if not video_id_match:
-            video_id_match = re.search(r'note/(\d+)', resp.text)
+    # Step 2: Extract aweme_id from final_url or page response
+    video_id_match = re.search(r'video/(\d+)', final_url)
+    if not video_id_match:
+        video_id_match = re.search(r'note/(\d+)', final_url)
+    if not video_id_match:
+        video_id_match = re.search(r'video/(\d+)', resp_text)
+    if not video_id_match:
+        video_id_match = re.search(r'note/(\d+)', resp_text)
 
-        video_id = video_id_match.group(1) if video_id_match else ""
-        if not video_id:
-            raise ValueError(f"Could not extract Douyin video ID from URL: {final_url}")
+    video_id = video_id_match.group(1) if video_id_match else ""
+    if not video_id:
+        raise ValueError(f"Could not extract Douyin video ID from URL: {final_url}")
 
-    # Step 3: Extract fresh ttwid from iesdouyin share page
+    # Step 3: Extract fresh ttwid from iesdouyin share page with Chrome impersonation
     ttwid = None
     share_url = f"https://www.iesdouyin.com/share/video/{video_id}/"
     try:
-        with httpx.Client(headers={'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'}, timeout=10) as client:
-            r_share = client.get(share_url)
+        if HAS_CURL_CFFI:
+            s_share = cffi_requests.Session(impersonate="chrome131")
+            r_share = s_share.get(share_url, headers={'User-Agent': mobile_ua}, timeout=10)
             ttwid = r_share.cookies.get('ttwid')
             if not ttwid:
-                for header_val in r_share.headers.get_list('set-cookie'):
-                    m = re.search(r'ttwid=([^;]+)', header_val)
-                    if m:
-                        ttwid = m.group(1)
-                        break
+                for k, v in r_share.headers.items():
+                    if k.lower() == 'set-cookie':
+                        m = re.search(r'ttwid=([^;]+)', v)
+                        if m:
+                            ttwid = m.group(1)
+                            break
+        else:
+            with httpx.Client(headers={'User-Agent': mobile_ua}, timeout=10) as client:
+                r_share = client.get(share_url)
+                ttwid = r_share.cookies.get('ttwid')
+                if not ttwid:
+                    for header_val in r_share.headers.get_list('set-cookie'):
+                        m = re.search(r'ttwid=([^;]+)', header_val)
+                        if m:
+                            ttwid = m.group(1)
+                            break
     except Exception as ttwid_err:
         logger.warning(f"Could not fetch ttwid from iesdouyin share page: {ttwid_err}")
 
@@ -723,21 +749,30 @@ def parse_video_douyin_abogus(url: str) -> dict:
         'Referer': f'https://www.douyin.com/video/{video_id}',
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        'Sec-Ch-Ua': '"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        'Sec-Ch-Ua': '"Chromium";v="131", "Not_A Brand";v="24", "Google Chrome";v="131"',
         'Sec-Ch-Ua-Mobile': '?0',
         'Sec-Ch-Ua-Platform': '"Windows"',
         'Cookie': cookie_header_str
     }
 
-    with httpx.Client(timeout=12) as client:
-        api_resp = client.get(api_url, headers=headers)
-        if not api_resp.text or not api_resp.text.strip():
-            raise ValueError(f"Empty response returned from Douyin Web Detail API (HTTP {api_resp.status_code})")
+    if HAS_CURL_CFFI:
+        s_api = cffi_requests.Session(impersonate="chrome131")
+        api_resp = s_api.get(api_url, headers=headers, timeout=12)
+        resp_status = api_resp.status_code
+        resp_text = api_resp.text
+    else:
+        with httpx.Client(timeout=12) as client:
+            api_resp = client.get(api_url, headers=headers)
+            resp_status = api_resp.status_code
+            resp_text = api_resp.text
 
-        try:
-            data = api_resp.json()
-        except Exception:
-            raise ValueError(f"Invalid JSON returned from Douyin API (HTTP {api_resp.status_code}): {api_resp.text[:80]}")
+    if not resp_text or not resp_text.strip():
+        raise ValueError(f"Empty response returned from Douyin Web Detail API (HTTP {resp_status})")
+
+    try:
+        data = api_resp.json()
+    except Exception:
+        raise ValueError(f"Invalid JSON returned from Douyin API (HTTP {resp_status}): {resp_text[:80]}")
 
         detail = data.get('aweme_detail')
         if not detail:
