@@ -17,6 +17,7 @@ import httpx
 import yt_dlp
 from telebot.async_telebot import AsyncTeleBot
 from telebot import types
+from abogus import ABogus, generate_a_bogus
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -621,6 +622,132 @@ def parse_video_pearktrue(url: str) -> dict:
         raise e
 
 
+def parse_video_douyin_abogus(url: str) -> dict:
+    """Primary parser that extracts 1080P/4K no-watermark video directly from Douyin Web Detail API using a_bogus signature."""
+    logger.info(f"Using a_bogus Web API parser for URL: {url}")
+
+    ua = ABogus.DEFAULT_USER_AGENT
+    
+    # Step 1: Follow redirects to obtain canonical URL & guest ttwid cookie
+    ttwid = None
+    with httpx.Client(headers={'User-Agent': ua}, follow_redirects=True, timeout=12) as client:
+        resp = client.get(url)
+        final_url = str(resp.url)
+        
+        for c in client.cookies.jar:
+            if c.name == 'ttwid':
+                ttwid = c.value
+                break
+        
+        # Step 2: Extract aweme_id from final_url or page response
+        video_id_match = re.search(r'video/(\d+)', final_url)
+        if not video_id_match:
+            video_id_match = re.search(r'note/(\d+)', final_url)
+        if not video_id_match:
+            video_id_match = re.search(r'video/(\d+)', resp.text)
+        if not video_id_match:
+            video_id_match = re.search(r'note/(\d+)', resp.text)
+
+        video_id = video_id_match.group(1) if video_id_match else ""
+        if not video_id:
+            raise ValueError(f"Could not extract Douyin video ID from URL: {final_url}")
+
+        # Step 3: Build Web API query parameters and calculate a_bogus signature
+        params_dict = {
+            'device_platform': 'webapp',
+            'aid': '6383',
+            'channel': 'channel_pc_web',
+            'aweme_id': video_id,
+            'update_version_code': '170400',
+            'pc_client_type': '1',
+            'pc_libra_divert': 'Windows',
+            'version_code': '190500',
+            'version_name': '19.5.0',
+            'cookie_enabled': 'true',
+            'screen_width': '1920',
+            'screen_height': '1080',
+            'browser_language': 'zh-CN',
+            'browser_platform': 'Win32',
+            'browser_name': 'Edge',
+            'browser_version': '131.0.0.0',
+            'browser_online': 'true',
+            'engine_name': 'Blink',
+            'engine_version': '131.0.0.0',
+            'os_name': 'Windows',
+            'os_version': '10',
+            'cpu_core_num': '12',
+            'device_memory': '8',
+            'platform': 'PC',
+            'downlink': '10',
+            'effective_type': '4g',
+            'round_trip_time': '50'
+        }
+
+        params_str = urllib.parse.urlencode(params_dict)
+        signer = ABogus(user_agent=ua)
+        signed_params, a_bogus_token, _, _ = signer.generate_abogus(params=params_str)
+
+        api_url = f"https://www.douyin.com/aweme/v1/web/aweme/detail/?{signed_params}"
+        headers = {
+            'User-Agent': ua,
+            'Referer': f'https://www.douyin.com/video/{video_id}',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Sec-Ch-Ua': '"Microsoft Edge";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Cookie': f'ttwid={ttwid}' if ttwid else ''
+        }
+
+        api_resp = client.get(api_url, headers=headers)
+        if not api_resp.text:
+            raise ValueError("Empty response returned from Douyin Web Detail API")
+
+        data = api_resp.json()
+        detail = data.get('aweme_detail')
+        if not detail:
+            status_msg = data.get('status_msg') or 'No aweme_detail object in JSON'
+            raise ValueError(f"Douyin detail API returned: {status_msg}")
+
+        title = detail.get('desc') or 'No Title'
+        nickname = detail.get('author', {}).get('nickname') or 'Unknown'
+        video_data = detail.get('video', {})
+        play_urls = video_data.get('play_addr', {}).get('url_list', [])
+        
+        # In case of bit_rate list with higher quality
+        if not play_urls and video_data.get('bit_rate'):
+            for br in video_data.get('bit_rate', []):
+                br_urls = br.get('play_addr', {}).get('url_list', [])
+                if br_urls:
+                    play_urls = br_urls
+                    break
+
+        if not play_urls:
+            raise ValueError("No playable CDN stream found in aweme_detail")
+
+        video_url = play_urls[0]
+        cover_urls = video_data.get('cover', {}).get('url_list', [])
+        cover_url = cover_urls[0] if cover_urls else ''
+        duration = float(video_data.get('duration') or 0) / 1000.0
+
+        metadata = {
+            'id': detail.get('aweme_id') or video_id,
+            'title': title,
+            'description': title,
+            'thumbnail': cover_url,
+            'uploader': nickname,
+            'duration': duration,
+            'raw_video_url': video_url,
+            'extractor': 'Douyin'
+        }
+
+        logger.info(f"✅ a_bogus API parse succeeded for {video_id}: {title[:40]}")
+        return {
+            'metadata': metadata,
+            'cookie_header': ''
+        }
+
+
 def parse_video_mobile_html(url: str) -> dict:
     """Fallback parser that extracts no-watermark video directly from Douyin mobile sharing HTML without cookies.
     
@@ -955,79 +1082,85 @@ def parse_video(url: str) -> dict:
                 logger.error(f"FixTweet API fallback failed: {str(api_err)}")
                 raise ValueError(f"Twitter/X 解析失败。yt-dlp 报错: {str(ytdlp_err)[:100]}; 敏感内容解析服务报错: {str(api_err)[:100]}")
 
-    # Step 1: Try Mobile HTML Scraper (fastest, no cookies/signatures needed for public videos)
+    # Step 1: Try Douyin a_bogus Web API (fastest, official 1080P/4K stream, zero login cookies needed)
     try:
-        return parse_video_mobile_html(url)
-    except Exception as mobile_err:
-        logger.warning(f"Mobile HTML Scraper failed: {str(mobile_err)[:100]}. Trying local yt-dlp...")
-        
-        # Step 2: Try local yt-dlp
+        return parse_video_douyin_abogus(url)
+    except Exception as abogus_err:
+        logger.warning(f"a_bogus Web API parser failed: {str(abogus_err)[:100]}. Trying Mobile HTML Scraper...")
+
+        # Step 2: Try Mobile HTML Scraper
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-
-                if 'entries' in info:
-                    entries = list(info['entries'])
-                    if not entries:
-                        raise ValueError("No video entries found in the URL")
-                    info = entries[0]
-
-                video_url = info.get('url')
-
-                if not video_url and info.get('formats'):
-                    formats = info.get('formats', [])
-                    valid_formats = [f for f in formats if f.get('url')]
-                    if valid_formats:
-                        video_url = valid_formats[-1]['url']
-
-                if not video_url:
-                    raise ValueError("Could not extract a direct video download URL")
-
-                cookies = []
-                for c in ydl.cookiejar:
-                    cookies.append(f"{c.name}={c.value}")
-                cookie_header = "; ".join(cookies)
-
-                extractor_name = info.get('extractor') or ''
-                if extractor_name.lower() in ['twitter', 'twitter:legacy']:
-                    extractor_name = 'Twitter / X'
-
-                metadata = {
-                    'id': info.get('id') or '',
-                    'title': info.get('title') or info.get('description') or 'No Title',
-                    'description': info.get('description') or '',
-                    'thumbnail': info.get('thumbnail') or (info.get('thumbnails')[-1]['url'] if info.get('thumbnails') else ''),
-                    'uploader': info.get('uploader') or info.get('uploader_id') or 'Unknown',
-                    'duration': float(info.get('duration') or 0),
-                    'raw_video_url': video_url,
-                    'extractor': extractor_name
-                }
-
-                return {
-                    'metadata': metadata,
-                    'cookie_header': cookie_header
-                }
-        except Exception as ytdlp_err:
-            logger.warning(f"yt-dlp parsing failed: {str(ytdlp_err)[:100]}. Trying Douyin web post API...")
+            return parse_video_mobile_html(url)
+        except Exception as mobile_err:
+            logger.warning(f"Mobile HTML Scraper failed: {str(mobile_err)[:100]}. Trying local yt-dlp...")
             
-            # Step 3: Try Douyin web post API (uses cookies, checks user's own latest posts)
+            # Step 3: Try local yt-dlp
             try:
-                return parse_video_douyin_web(url)
-            except Exception as web_err:
-                logger.warning(f"Douyin web post API failed: {str(web_err)[:100]}. Trying douyin.wtf...")
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+
+                    if 'entries' in info:
+                        entries = list(info['entries'])
+                        if not entries:
+                            raise ValueError("No video entries found in the URL")
+                        info = entries[0]
+
+                    video_url = info.get('url')
+
+                    if not video_url and info.get('formats'):
+                        formats = info.get('formats', [])
+                        valid_formats = [f for f in formats if f.get('url')]
+                        if valid_formats:
+                            video_url = valid_formats[-1]['url']
+
+                    if not video_url:
+                        raise ValueError("Could not extract a direct video download URL")
+
+                    cookies = []
+                    for c in ydl.cookiejar:
+                        cookies.append(f"{c.name}={c.value}")
+                    cookie_header = "; ".join(cookies)
+
+                    extractor_name = info.get('extractor') or ''
+                    if extractor_name.lower() in ['twitter', 'twitter:legacy']:
+                        extractor_name = 'Twitter / X'
+
+                    metadata = {
+                        'id': info.get('id') or '',
+                        'title': info.get('title') or info.get('description') or 'No Title',
+                        'description': info.get('description') or '',
+                        'thumbnail': info.get('thumbnail') or (info.get('thumbnails')[-1]['url'] if info.get('thumbnails') else ''),
+                        'uploader': info.get('uploader') or info.get('uploader_id') or 'Unknown',
+                        'duration': float(info.get('duration') or 0),
+                        'raw_video_url': video_url,
+                        'extractor': extractor_name
+                    }
+
+                    return {
+                        'metadata': metadata,
+                        'cookie_header': cookie_header
+                    }
+            except Exception as ytdlp_err:
+                logger.warning(f"yt-dlp parsing failed: {str(ytdlp_err)[:100]}. Trying Douyin web post API...")
                 
-                # Step 4: Try douyin.wtf public API
+                # Step 4: Try Douyin web post API (uses cookies, checks user's own latest posts)
                 try:
-                    return parse_video_fallback(url)
-                except Exception as fallback_err_1:
-                    logger.warning(f"douyin.wtf failed: {str(fallback_err_1)[:80]}. Trying pearktrue...")
+                    return parse_video_douyin_web(url)
+                except Exception as web_err:
+                    logger.warning(f"Douyin web post API failed: {str(web_err)[:100]}. Trying pearktrue...")
                     
                     # Step 5: Try PearkTrue public API
                     try:
                         return parse_video_pearktrue(url)
                     except Exception as fallback_err_2:
-                        logger.error(f"All parsers failed. mobile_err={str(mobile_err)[:60]} ytdlp={str(ytdlp_err)[:60]} web_err={str(web_err)[:60]}")
-                        raise mobile_err
+                        logger.warning(f"PearkTrue failed: {str(fallback_err_2)[:80]}. Trying douyin.wtf...")
+                        
+                        # Step 6: Try douyin.wtf public API
+                        try:
+                            return parse_video_fallback(url)
+                        except Exception as fallback_err_1:
+                            logger.error(f"All parsers failed. abogus={str(abogus_err)[:50]} mobile={str(mobile_err)[:50]} ytdlp={str(ytdlp_err)[:50]}")
+                            raise ValueError(f"解析失败: 抖音官方接口与备用解析均未返回有效视频流 (abogus: {str(abogus_err)[:60]})")
 
 
 
