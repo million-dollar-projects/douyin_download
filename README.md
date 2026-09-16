@@ -5,152 +5,182 @@
 [![yt--dlp](https://img.shields.io/badge/yt--dlp-Active-blue.svg?style=flat)](https://github.com/yt-dlp/yt-dlp)
 [![Telegram Bot](https://img.shields.io/badge/Telegram--Bot-Active-26A5E4.svg?style=flat&logo=Telegram)](https://core.telegram.org/bots)
 
-这是一个专为个人及频道管理员设计的 **TikTok (抖音国际版) & Douyin (抖音)** 无水印高清视频解析与下载的开源集成系统。包含 **高性能 FastAPI 后端 API**、**现代化毛玻璃网页 UI 客户端** 以及 **多功能的 Telegram 机器人**。
+这是一个专为个人及频道管理员设计的 **TikTok (抖音国际版) & Douyin (抖音) / Twitter(X)** 无水印高清视频解析与下载的高可用系统。包含 **高性能 FastAPI 后端 API**、**现代化毛玻璃网页 UI 客户端** 以及 **多功能的 Telegram 机器人**。
 
 ---
 
-## 🌟 核心特性
+## 🌟 核心特性与架构亮点
 
-- ⚡ **超凡速度 & 免 Cookie 解析（首选优先）**：
-  * 重构了基于抖音 Reflow 移动页面的 `window._ROUTER_DATA` 结构化爬取器。
-  * **99% 别人的公开视频解析完全无需配置任何 Cookie 或签名验证**，并在 2 秒内极速获取无水印地址，极大延长个人 Cookie 的生存期。
-- 🍪 **私密视频支持 (Cookie Web 备份模式)**：
-  * 集成 yt-dlp & 抖音 Web 作品列表 API 作为二级备份，配合您配置的 Cookie，可稳定下载您本人的“仅自己可见”等私密视频。
-- ⚙️ **极简便捷的 Telegram 机器人交互**：
-  * **常驻底部物理键盘**：无需打字输入 `/settings`，直接点击聊天框下方的 `📥 直接返回给您` 或 `📤 发送到频道` 大按钮，即可**一键无缝切换并记住您的视频发送模式**。
-  * **智能容灾自动降级**：
-    * 当视频文件小于 50MB 时，机器人会直接把去水印的高清 MP4 文件发送到您的对话或频道中，支持 Telegram 内置流媒体直接播放。
-    * 当视频过大（触发 Telegram 50MB 上传限制）时，机器人将自动降级为生成并发送带防盗链的本地 `/stream` 代理下载链接。
-- 🖥️ **现代化毛玻璃 Web 客户端**：
-  * 内置极其精美的 Glassmorphism 网页 UI，支持直接粘贴视频分享文本，一键解析下载，并且自带媒体播放预览。
+- ⚡ **原生 App 客户端 Feed 协议（主力首选，免 Cookie/免风控）**：
+  * 基于抖音官方 Android/iOS 客户端（`com.ss.android.ugc.aweme`）核心原生接口。
+  * **完全无需登录 Cookie、无需额外签名参数**，毫秒级直接获取 1080P/4K 无水印视频源。
+  * 完美规避海外机房数据中心 IP（Render、AWS、GCP 等）被字节跳动 Web WAF 拦截 403 的问题。
+  * **全格式支持**：原生支持单/多视频、图文笔记（多图无水印高清原图提取）及背景音频提取。
+- 🛡️ **七级自适应容灾降级解析链**：
+  * 内置从官方原生协议、纯 Python `a_bogus` 签名、移动端 HTML 抓取、`yt-dlp` 到第三方公共网关等 7 级备用链路，任一环节失效自动无缝切换。
+- 🍪 **私密视频与自用作品支持**：
+  * 支持一键上传 `cookies.txt`，配合 yt-dlp 及创作者 Web 作品列表 API，可稳定下载您个人账号下“仅自己可见”等私密视频。
+- 🤖 **极简便捷的 Telegram 机器人交互**：
+  * **常驻底部物理键盘**：直接点击聊天框下方的 `📥 直接返回给您` 或 `📤 发送到频道`，一键切换并记住发送模式。
+  * **智能文件流/代理链接降级**：小于 50MB 自动发送无水印 MP4 文件直传；超过限制自动发送中转流媒体代理链接。
 - 🛡️ **视频流媒体中转代理**：
-  * 内置专门的 `/stream` 代理分发接口，完美解决抖音/TikTok CDN 连接的 Referer 防盗链防跨域问题，支持在任何网络环境下直接播放和流畅下载。
-- 🔄 **全自动 Token 刷新后台服务**：
-  * 后台每 15 分钟自动请求一次抖音接口以刷新 `msToken`，尽可能自动保持 Cookie 的状态健康。
-- 📲 **自动化 Chrome Cookie 一键推送脚本**：
-  * 内置 `update_cookies_render.sh` 脚本，可一键读取本地 Chrome 的抖音登录 Session 信息并自动化加密推送到部署好的 Render 服务器中。
+  * 内置 `/stream` 代理分发接口，完美解决抖音/TikTok CDN 连接的 Referer 防盗链防跨域问题，支持在任何网络环境下直接播放和流畅下载。
 
 ---
 
-## 📂 项目结构
+## 🧩 核心解析获取方案详述（技术参考手册）
+
+为了保证在抖音平台未来更新或风控调整时能够迅速排查与维护，以下详细记录了系统内置的各级解析方案及底层技术原理：
+
+```mermaid
+flowchart TD
+    A[用户输入分享链接/短链] --> B[提取视频/图文 ID aweme_id]
+    B --> C{Level 1: 官方 App Feed API}
+    C -- 成功/推荐 --> R[返回 1080P/图文/音频直链]
+    C -- 失败/超时 --> D{Level 2: a_bogus Web API + Chrome TLS}
+    D -- 成功 --> R
+    D -- 失败 --> E{Level 3: 移动端 H5 分享页抓取}
+    E -- 成功 --> R
+    E -- 失败 --> F{Level 4: yt-dlp + cookies.txt}
+    F -- 成功 --> R
+    F -- 失败 --> G{Level 5: 创作者 Web 作品列表匹配}
+    G -- 成功 --> R
+    G -- 失败 --> H{Level 6/7: 聚合公共解析 API 网关}
+    H -- 成功 --> R
+    H -- 失败 --> FAIL[抛出详细异常并记录日志]
+```
+
+---
+
+### Level 1: 抖音移动 App 客户端 Feed 协议（当前主力 ⭐️⭐️⭐️⭐️⭐️）
+* **原理**：模拟抖音官方 App 客户端信息流请求，通过官方网关直接查询作品详情。
+* **主要 API 节点**：
+  * `https://aweme.snssdk.com/aweme/v1/feed/?aweme_id={video_id}`
+  * `https://api5-normal-c-lq.amemv.com/aweme/v1/feed/?aweme_id={video_id}`
+  * `https://api3-normal-c-hl.amemv.com/aweme/v1/feed/?aweme_id={video_id}`
+  * `https://api.amemv.com/aweme/v1/feed/?aweme_id={video_id}`
+  * `https://aweme-hl.snssdk.com/aweme/v1/feed/?aweme_id={video_id}`
+* **请求头要求**：
+  ```http
+  User-Agent: com.ss.android.ugc.aweme/290101 (Linux; U; Android 12; zh_CN; SM-G988N; Build/SP1A.210812.016; Cronet/TTNetVersion:d1da0ea9 2023-01-13 QuicVersion:51879282 2022-12-07)
+  Accept: application/json
+  ```
+* **核心字段提取**：
+  * 视频地址：`aweme_list[0].video.play_addr.url_list`（多线路 1080P CDN）
+  * 图文笔记：`aweme_list[0].images[].url_list[0]`（无水印高清大图）
+  * 标题/作者：`aweme_list[0].desc` / `aweme_list[0].author.nickname`
+* **优势**：无需登录、无 Cookie 依赖、无复杂算法签名、无海外数据中心 IP 拦截。
+
+---
+
+### Level 2: 纯 Python `a_bogus` 签名 Web API 引擎
+* **原理**：调用抖音官方 Web 网页端详情接口 `https://www.douyin.com/aweme/v1/web/aweme/detail/`。
+* **技术实现**：
+  * 位于 [`abogus.py`](file:///Users/yangzie/py/douyin/abogus.py)，纯 Python 原生实现（包含国密 SM3 哈希、RC4 流加密、浏览器指纹特征映射与自定义 Base64 变体转码），零 C/Node.js 外部依赖。
+  * 引入 `curl_cffi` 实现 Chrome 131 TLS 握手特征伪装（JA3/JA4 指纹），规避字节跳动底层 WAF 的 TLS 拦截。
+* **适用场景**：官方 Web 页面开放或携带基础 `ttwid` 访问。
+
+---
+
+### Level 3: 移动端 H5 分享页抓取（Mobile Reflow HTML）
+* **原理**：抓取 `https://www.iesdouyin.com/share/video/{video_id}/` 页面源码。
+* **数据提取**：历史版本可直接从 `window._ROUTER_DATA` 或正则匹配 `playwm -> play` 获取直链。
+
+---
+
+### Level 4: `yt-dlp` 本地引擎 + `cookies.txt`
+* **原理**：调用开源 `yt-dlp` 库，配合挂载的 `cookies.txt` 模拟真实浏览器登录会话。
+* **适用场景**：需要用户登录权限的内容（如私密作品、好友圈视频、高限制地区视频）。
+
+---
+
+### Level 5: 创作者 Web 作品列表匹配 (`aweme/v1/web/aweme/post`)
+* **原理**：在用户配置了自身 Cookie 后，调用创作者后台作品接口匹配对应的 `aweme_id`。
+
+---
+
+### Level 6 & 7: 免费公共解析 API 聚合网关
+* **集成网关**：
+  * PearkTrue API (`api.pearktrue.cn`)
+  * douyin.wtf API (`api.douyin.wtf`)
+* **作用**：当所有官方接口遭受突发高强度风控或网络波动时的最后兜底保障。
+
+---
+
+## 🛠️ 故障排查与维护指南 (Troubleshooting)
+
+如果日后抖音平台再次调整接口策略导致解析失败，请按以下步骤进行排查：
+
+| 异常现象 | 可能原因 | 排查与解决步骤 |
+| :--- | :--- | :--- |
+| **解析提示 403 Blocked by ByteDance Security** | 触发了字节跳动海外机房 IP 拦截（通常发生在 Web 接口） | 1. 确保 Level 1 的 App Feed 协议处于最高优先级。<br>2. 检查 `requirements.txt` 中是否安装了 `curl_cffi`。<br>3. 检查 App Feed 备用 Host 列表是否可连通。 |
+| **API 返回 0 字节空响应 / 提示强制登录** | Web 端详情接口启用了匿名防护（`x-whale-throughput-abort-data: 强制登录`） | 说明 Web 接口未登录已被限制，确认系统已自动切换至 App Feed 或使用带 Cookie 的 `yt-dlp`。 |
+| **短链无法提取 video_id** | 抖音短链重定向规则变更 | 检查 `parse_video_douyin_app_feed` 中的正则提取逻辑，测试 `https://v.douyin.com/xxxx/` 重定向后的 URL 结构。 |
+| **私密视频解析失败** | Cookie 过期或 `sessionid` 失效 | 使用内置脚本 `./update_cookies_render.sh` 重新从本地 Chrome 导出并推送最新 Cookie。 |
+
+---
+
+## 📂 项目文件结构
 
 ```
 .
-├── main.py                    # 核心引擎 (包含 FastAPI 路由、解析逻辑与 Telegram 机器人定义)
+├── main.py                    # 核心引擎 (FastAPI 路由、7 级降级解析流水线与 Telegram 机器人)
+├── abogus.py                  # 纯 Python 实现的 a_bogus 签名算法模块 (SM3 + RC4 + Base64)
 ├── index.html                 # 现代化的毛玻璃网页前端 UI
-├── requirements.txt           # 依赖包列表
-├── render.yaml                # Render 自动化一键部署配置
-├── update_cookies_render.sh   # macOS 下 Chrome 浏览器 Cookie 提取与同步脚本
-└── user_preferences.json      # 用户设置本地持久化文件 (自动生成)
+├── requirements.txt           # 依赖列表 (包含 fastapi, curl_cffi, yt-dlp, pyTelegramBotAPI 等)
+├── render.yaml                # Render 自动化部署蓝图配置
+├── update_cookies_render.sh   # macOS 下 Chrome 浏览器 Cookie 一键提取与推送脚本
+└── user_preferences.json      # 用户配置持久化文件
 ```
 
 ---
 
-## 🚀 快速开始
+## 🚀 部署与运行
 
 ### 方式一：一键部署到 Render (推荐)
 
-项目已完美适配 Render 的基础设施。您可以直接利用项目中的 `render.yaml` 进行自动化部署：
-
-1. 将本项目 Fork 到您的 GitHub。
-2. 登录 [Render](https://render.com/)，在 Dashboard 中选择 **Blueprints**。
-3. 连接您的 GitHub 仓库并部署。
-4. **配置环境变量**（在 Service 的 Environment 中设置）：
-
-| 环境变量 | 是否必填 | 描述 |
-| :--- | :---: | :--- |
-| `TELEGRAM_BOT_TOKEN` | 否 | 如果需要激活 Telegram Bot，请填入从 `@BotFather` 处获取的 Token。 |
-| `TELEGRAM_CHANNEL` | 否 | 默认推送的 Telegram 频道用户名或 ID（例如 `@my_channel`），必须将 Bot 设为该频道的管理员。 |
-| `RENDER_EXTERNAL_URL` | 否 (生产推荐) | 服务在 Render 上的外部公开 URL（例如 `https://your-app.onrender.com`），用于配置 Bot 的 Webhook 以及流媒体代理下载链接。 |
-| `COOKIES_UPDATE_TOKEN` | 否 | 用于保护 `/update-cookies` 接口的密钥 Token，可防止他人恶意上传垃圾 cookie。配置后推送脚本须带上此 Token。 |
-| `COOKIES_CONTENT` | 否 | 初始的 Netscape 格式的 Cookie 文本内容（选填）。 |
-
----
+1. Fork 本项目到您的 GitHub 仓库。
+2. 在 [Render](https://render.com/) 中创建 **Blueprint** 实例并连接仓库。
+3. 配置环境变量：
+   * `TELEGRAM_BOT_TOKEN`: Telegram 机器人 Token（由 `@BotFather` 提供）。
+   * `TELEGRAM_CHANNEL`: 默认推送的频道用户名（如 `@your_channel`）。
+   * `RENDER_EXTERNAL_URL`: 服务在 Render 上的外部公开 URL（如 `https://your-app.onrender.com`）。
+   * `COOKIES_UPDATE_TOKEN`: `/update-cookies` 接口的安全密钥 Token。
 
 ### 方式二：本地运行调试
 
-1. **克隆项目并进入目录**：
-   ```bash
-   git clone <your-repo-url>
-   cd douyin
-   ```
+```bash
+# 1. 创建并激活虚拟环境
+python3 -m venv .venv
+source .venv/bin/activate
 
-2. **创建并激活虚拟环境**：
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
+# 2. 安装依赖
+pip install -r requirements.txt
 
-3. **安装依赖**：
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **启动服务**：
-   ```bash
-   uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-   ```
-   启动后：
-   * 网页客户端：`http://127.0.0.1:8000`
-   * API 文档：`http://127.0.0.1:8000/docs`
+# 3. 启动服务
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+```
 
 ---
 
-## 🍪 抖音登录 Cookie 提取与自动推送 (针对私密视频)
+## 🤖 开放 API 接口
 
-若需要下载**您自己的私密视频**，需要把您 Chrome 浏览器里的抖音登录状态 Cookie 上传到服务器。我们编写了非常方便的自动化脚本：
-
-1. **前提条件**：
-   * 确保您的电脑是 macOS 且安装了 Google Chrome。
-   * 打开 Chrome 登录 `https://www.douyin.com/`，确保处于登录状态（能看到自己头像）。
-
-2. **配置并运行同步脚本**：
-   * 打开 `update_cookies_render.sh`，将第 7 行的 `RENDER_URL` 改为您实际部署的服务器 URL。
-   * 如果配置了 `COOKIES_UPDATE_TOKEN` 环境变量，请在本地终端运行：
-     ```bash
-     export COOKIES_UPDATE_TOKEN="您设置的密钥"
-     ./update_cookies_render.sh
-     ```
-   * 脚本会自动从您的 Chrome `Default` 或各 `Profile` 中解密出 `sessionid`，并通过 API 安全地上传到您的 Render 服务器上。
-
----
-
-## 🤖 Telegram 机器人使用指南
-
-1. 启动机器人后，发送 `/start`。
-2. 机器人会弹出带有 **`📥 直接返回给您`** 和 **`📤 发送到频道`** 的底部常驻键盘。
-3. **点击按钮即可即时切换发送接收模式**。
-4. 直接向机器人粘贴发送抖音或 TikTok 的分享文案或链接（例如：`8.02 YZM:/ 11/15 l@P.KJ :7pm 欣赏的眼光看世界 #美女日常 https://v.douyin.com/xxxx/`）。
-5. 机器人会自动识别链接、极速解析，并根据您的设置推送无水印视频。
-
----
-
-## 🛠️ 开放接口 (API Endpoints)
-
-### 1. 解析视频信息
+### 1. 视频解析接口
 * **路径**：`POST /parse`
 * **请求体**：
   ```json
   {
-    "url": "https://v.douyin.com/xxxx/"
+    "url": "https://v.douyin.com/w6dXePahxrw/"
   }
   ```
-* **返回**：`VideoMetadata` 格式 JSON 数据。
+* **返回**：包含视频 ID、标题、封面图、1080P CDN 直链及代理直链的 `VideoMetadata` 对象。
 
 ### 2. 流媒体代理分发接口
-* **路径**：`GET /stream`
-* **参数**：
-  * `url`: 原始视频 CDN 直连链接
-  * `cookies`: 用于中转的 Cookie 字符串
-  * `referer`: 引用页地址
-  * `download`: 设为 `1` 将直接触发浏览器下载保存，否则为在线播放流媒体。
-
-### 3. 查看 Cookie 状态
-* **路径**：`GET /cookie-status`
-* **返回**：当前服务器端 `cookies.txt` 的健康度、有效期和包含哪些 Token 的状态报告。
+* **路径**：`GET /stream?url={cdn_url}&download=1`
+* **说明**：中转代理下载/播放，解决 Referer 防盗链问题。
 
 ---
 
 ## 📄 开源许可证
 
-本项目基于 MIT 许可证开源。请勿将本项目用于任何商业或非法侵权用途，因使用本项目产生的任何民事争议或法律责任由使用者自行承担。
+本项目基于 MIT 许可证开源。请勿将本项目用于任何商业或侵权用途，使用本项目产生的一切法律责任由使用者自行承担。
