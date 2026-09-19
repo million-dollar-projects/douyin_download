@@ -154,20 +154,22 @@ def extract_http_url(text: str) -> str:
 
 
 def clean_error_message(error_msg: str) -> str:
-    """Strips ANSI escape characters and converts common yt-dlp errors to friendly Chinese messages."""
+    """Strips ANSI escape characters and converts common errors to friendly Chinese messages."""
     ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
     cleaned = ansi_escape.sub('', error_msg)
 
+    if "该视频可能已被作者删除" in cleaned or "重定向至首页" in cleaned:
+        return "解析失败：该视频可能已被原作者删除、下架、设为私密，或分享链接已失效（抖音官方已自动将该短链重定向至首页）。"
     if "Fresh cookies (not necessarily logged in) are needed" in cleaned:
         return "解析失败：该平台（抖音/TikTok）目前强化了防爬虫限制，需要有效的 Cookie。请获取您浏览器的 Netscape 格式 Cookie 并保存到项目根目录下的 cookies.txt 文件中。"
-    if "Unsupported URL" in cleaned:
-        return "解析失败：暂不支持该链接，请确认输入的是抖音 (Douyin)、TikTok 或 X (Twitter) 的有效视频分享链接。"
+    if "Unsupported URL" in cleaned or "Could not extract Douyin video" in cleaned:
+        return "解析失败：未能获取到有效视频 ID。该视频可能已被作者删除、设为私密，或分享链接已失效。"
     if "No video could be found in this tweet" in cleaned:
         return "解析失败：未在推文中检测到视频。如果该视频包含敏感或成人内容 (NSFW/年龄限制)，需要您导出已登录 X (Twitter) 账号的浏览器 Cookie (Netscape 格式) 并追加保存到项目根目录下的 cookies.txt 文件中以完成授权访问。"
     if "Your IP address is blocked" in cleaned or "HTTP Error 403" in cleaned:
         return "解析失败：服务器 IP 被平台暂时封禁/限制访问，请尝试配置代理或在 cookies.txt 中加入 Cookie 凭证。"
 
-    return f"解析失败：{cleaned}"
+    return f"解析失败: {cleaned}"
 
 
 # ==========================================
@@ -677,6 +679,8 @@ def parse_video_douyin_app_feed(url: str) -> dict:
             video_id = id_match.group(1)
 
     if not video_id:
+        if final_url and (final_url.rstrip('/') in ["https://www.douyin.com", "http://www.douyin.com", "https://douyin.com", "http://douyin.com", "https://m.douyin.com"]):
+            raise ValueError("该视频可能已被作者删除、下架、设为私密，或分享链接已失效（抖音官方已将该短链重定向至首页）")
         raise ValueError(f"Could not extract Douyin video/note ID from {url}")
 
     last_err = None
@@ -1352,14 +1356,14 @@ def parse_video(url: str) -> dict:
                         try:
                             return parse_video_pearktrue(url)
                         except Exception as fallback_err_2:
-                            logger.warning(f"PearkTrue failed: {str(fallback_err_2)[:80]}. Trying douyin.wtf...")
-                            
                             # Step 7: Try douyin.wtf public API
                             try:
                                 return parse_video_fallback(url)
                             except Exception as fallback_err_1:
                                 logger.error(f"All parsers failed. app_feed={str(app_feed_err)[:50]} abogus={str(abogus_err)[:50]} ytdlp={str(ytdlp_err)[:50]}")
-                                raise ValueError(f"解析失败: 抖音官方接口与备用解析均未返回有效视频流 (app_feed: {str(app_feed_err)[:60]})")
+                                if "该视频可能已被作者删除" in str(app_feed_err):
+                                    raise ValueError(str(app_feed_err))
+                                raise ValueError(f"解析失败: 抖音官方接口与备用解析均未返回有效视频流 ({str(app_feed_err)[:60]})")
 
 
 
