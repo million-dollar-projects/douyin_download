@@ -10,8 +10,9 @@ import gc
 import ctypes
 import uuid
 import time
+from typing import Optional
 from fastapi import FastAPI, HTTPException, status, Query, Request, BackgroundTasks
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, Response
 from pydantic import BaseModel, Field
 import httpx
 import yt_dlp
@@ -396,6 +397,81 @@ def get_cached_retry_url(retry_id: str) -> str:
     entry = RETRY_CACHE.get(retry_id)
     if entry:
         return entry[0]
+    return None
+
+
+DOWNLOAD_CACHE: dict[str, tuple[dict, float]] = {}
+
+def save_download_info(dl_id: str, info: dict) -> None:
+    """Saves short download link metadata to in-memory cache and Upstash Redis (7-day TTL)."""
+    now = time.time()
+    expired_ids = [k for k, v in DOWNLOAD_CACHE.items() if now - v[1] > 86400]
+    for k in expired_ids:
+        DOWNLOAD_CACHE.pop(k, None)
+    if len(DOWNLOAD_CACHE) >= 500:
+        oldest_key = min(DOWNLOAD_CACHE, key=lambda k: DOWNLOAD_CACHE[k][1])
+        DOWNLOAD_CACHE.pop(oldest_key, None)
+
+    DOWNLOAD_CACHE[dl_id] = (info, now)
+
+    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        try:
+            val_str = json.dumps(info, ensure_ascii=False)
+            req = urllib.request.Request(
+                UPSTASH_REDIS_REST_URL,
+                data=json.dumps(["SET", f"dl:{dl_id}", val_str, "EX", 604800]).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}",
+                    "Content-Type": "application/json"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5):
+                pass
+        except Exception as e:
+            logger.warning(f"Failed to persist download info to Upstash Redis: {e}")
+
+
+def cache_download_info(raw_cdn_url: str, cookie_header: str, orig_url: str, title: str = "") -> str:
+    """Creates a short download ID and caches its streaming metadata."""
+    dl_id = uuid.uuid4().hex[:8]
+    info = {
+        "url": raw_cdn_url,
+        "cookies": cookie_header or "",
+        "orig_url": orig_url or "",
+        "title": title or "",
+    }
+    save_download_info(dl_id, info)
+    return dl_id
+
+
+def get_cached_download_info(dl_id: str) -> Optional[dict]:
+    """Retrieves short download link metadata from memory or Upstash Redis."""
+    entry = DOWNLOAD_CACHE.get(dl_id)
+    if entry:
+        return entry[0]
+
+    if UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN:
+        try:
+            req = urllib.request.Request(
+                UPSTASH_REDIS_REST_URL,
+                data=json.dumps(["GET", f"dl:{dl_id}"]).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {UPSTASH_REDIS_REST_TOKEN}",
+                    "Content-Type": "application/json"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                result_data = json.loads(resp.read().decode("utf-8"))
+                val = result_data.get("result")
+                if val:
+                    info = json.loads(val)
+                    DOWNLOAD_CACHE[dl_id] = (info, time.time())
+                    return info
+        except Exception as e:
+            logger.warning(f"Failed to load download info from Upstash Redis: {e}")
+
     return None
 
 
@@ -1486,6 +1562,125 @@ async def stream_video(
     )
 
 
+@app.api_route("/dl/{dl_id}", methods=["GET", "HEAD"])
+async def short_download_video(dl_id: str, request: Request):
+    """Short URL video download proxy with automatic expired-CDN refresh."""
+    info = get_cached_download_info(dl_id)
+    if not info or not info.get("url"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="下载链接不存在或已过期，请重新发送原视频链接进行解析。"
+        )
+
+    def build_upstream_headers(cdn_url: str, cookies_val: str, orig_url: str) -> dict[str, str]:
+        req_referer = orig_url
+        if not req_referer:
+            req_referer = "https://www.tiktok.com/"
+            if "douyin.com" in cdn_url or "amemv.com" in cdn_url:
+                req_referer = "https://www.douyin.com/"
+        hdrs = {
+            "Referer": req_referer,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+        }
+        if cookies_val:
+            hdrs["Cookie"] = cookies_val
+        if "range" in request.headers:
+            hdrs["Range"] = request.headers["range"]
+        return hdrs
+
+    cdn_url = info["url"]
+    cookies_val = info.get("cookies", "")
+    orig_url = info.get("orig_url", "")
+    title = info.get("title", "")
+
+    client = httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(60.0, connect=15.0))
+    resp = None
+    try:
+        headers = build_upstream_headers(cdn_url, cookies_val, orig_url)
+        req = client.build_request("GET", cdn_url, headers=headers)
+        resp = await client.send(req, stream=True)
+
+        # If CDN signed URL expired, try re-parsing original share URL once
+        if resp.status_code >= 400 and orig_url:
+            await resp.aclose()
+            resp = None
+            logger.info(f"Short download {dl_id} upstream returned >=400, refreshing from orig_url...")
+            refreshed = await asyncio.to_thread(parse_video, orig_url)
+            cdn_url = refreshed["metadata"]["raw_video_url"]
+            cookies_val = refreshed.get("cookie_header", "")
+            title = title or refreshed["metadata"].get("title", "")
+            info = {
+                "url": cdn_url,
+                "cookies": cookies_val,
+                "orig_url": orig_url,
+                "title": title,
+            }
+            save_download_info(dl_id, info)
+            headers = build_upstream_headers(cdn_url, cookies_val, orig_url)
+            req = client.build_request("GET", cdn_url, headers=headers)
+            resp = await client.send(req, stream=True)
+
+        if resp.status_code >= 400:
+            code = resp.status_code
+            await resp.aclose()
+            await client.aclose()
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"视频源访问失败 (HTTP {code})，请重新发送原链接解析。"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        if resp is not None:
+            await resp.aclose()
+        await client.aclose()
+        logger.error(f"Short download {dl_id} failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="无法连接视频源服务器，请稍后重试。"
+        )
+
+    content_type = resp.headers.get("content-type", "video/mp4")
+    response_headers: dict[str, str] = {}
+    for hdr_name in ("content-length", "content-range", "accept-ranges"):
+        if hdr_name in resp.headers:
+            response_headers[hdr_name.title()] = resp.headers[hdr_name]
+
+    safe_title = re.sub(r'[\\/:*?"<>|\r\n]+', "_", title).strip()[:60]
+    if safe_title:
+        encoded_title = urllib.parse.quote(safe_title)
+        response_headers["Content-Disposition"] = (
+            f"attachment; filename=\"video_{dl_id}.mp4\"; filename*=UTF-8''{encoded_title}.mp4"
+        )
+    else:
+        response_headers["Content-Disposition"] = f"attachment; filename=\"video_{dl_id}.mp4\""
+
+    status_code = resp.status_code
+
+    if request.method == "HEAD":
+        await resp.aclose()
+        await client.aclose()
+        return Response(status_code=status_code, media_type=content_type, headers=response_headers)
+
+    async def stream_chunks():
+        try:
+            async for chunk in resp.aiter_bytes(chunk_size=65536):
+                yield chunk
+        except Exception as stream_err:
+            logger.error(f"Error streaming short download {dl_id}: {stream_err}")
+        finally:
+            await resp.aclose()
+            await client.aclose()
+            clean_memory()
+
+    return StreamingResponse(
+        stream_chunks(),
+        status_code=status_code,
+        media_type=content_type,
+        headers=response_headers,
+    )
+
+
 # ==========================================
 # Telegram Bot Integrations
 # ==========================================
@@ -1987,13 +2182,15 @@ if bot:
             except Exception as dl_upload_err:
                 logger.warning(f"Failed to post video directly: {str(dl_upload_err)}")
 
-                # Build download link using fallback configuration (RENDER_EXTERNAL_URL)
+                # Build short download link to avoid giant URL confirmation dialog & support CopyTextButton
                 base_url = RENDER_EXTERNAL_URL.rstrip('/') + '/' if RENDER_EXTERNAL_URL else "http://localhost:8000/"
-                encoded_cdn = urllib.parse.quote(raw_cdn_url)
-                encoded_cookies = urllib.parse.quote(cookie_header)
-                encoded_orig = urllib.parse.quote(target_url)
-
-                proxy_download_url = f"{base_url}stream?url={encoded_cdn}&cookies={encoded_cookies}&referer={encoded_orig}&download=1"
+                dl_id = cache_download_info(
+                    raw_cdn_url=raw_cdn_url,
+                    cookie_header=cookie_header,
+                    orig_url=target_url,
+                    title=metadata.get('title') or metadata.get('description') or '',
+                )
+                short_download_url = f"{base_url}dl/{dl_id}"
 
                 # Truncate and clean the error message for markdown
                 err_details = str(dl_upload_err)
@@ -2007,15 +2204,19 @@ if bot:
                     f"⏱️ 时长: {metadata.get('duration', 0)}秒\n\n"
                     f"⚠️ 因视频文件过大 (>50MB) 或机器人权限受限，未能直接上传视频文件。\n"
                     f"*(错误详情: {escaped_err})*\n"
-                    f"🔗 您可以点击下方按钮直接下载或重新上传："
+                    f"🔗 您可以点击下方按钮复制链接或直接下载："
                 )
 
-                retry_id = cache_retry_url(target_url)
                 markup = types.InlineKeyboardMarkup()
-                dl_btn = types.InlineKeyboardButton(text="📥 点击下载无水印视频", url=proxy_download_url)
-                retry_btn = types.InlineKeyboardButton(text="🔄 重新尝试上传", callback_data=f"retry_up:{retry_id}")
-                markup.row(dl_btn)
-                markup.row(retry_btn)
+                copy_btn = types.InlineKeyboardButton(
+                    text="📋 复制链接",
+                    copy_text=types.CopyTextButton(text=short_download_url[:256])
+                )
+                dl_btn = types.InlineKeyboardButton(
+                    text="📥 直接点击下载",
+                    url=short_download_url
+                )
+                markup.row(copy_btn, dl_btn)
 
                 if is_uploading_to_channel:
                     try:
